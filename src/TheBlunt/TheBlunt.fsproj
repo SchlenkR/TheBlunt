@@ -1,0 +1,18 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>netstandard2.0</TargetFramework>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="TheBlunt.fs" />
+  </ItemGroup>
+
+    <ItemGroup>
+    <Content Include="*.fsproj; **\*.fs; **\*.fsi; *.js;" Exclude="**\*.fs.js; obj\**\*.fs" PackagePath="fable\" />
+    <None Include="..\..\README.md" Pack="true" PackagePath="\" />
+    <!-- <None Include="..\..\..\artwork\nuget_logo.png" Pack="true" PackagePath="\" /> -->
+  </ItemGroup>
+
+
+</Project>

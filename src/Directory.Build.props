@@ -1,0 +1,33 @@
+<Project>
+
+  <PropertyGroup>
+    <Description>A a one-file parser combinator for F# and Fable.</Description>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <Version>1.0.0-preview01</Version>
+    <PackageReleaseNotes>
+      - 0.0.0
+        Initial release
+    </PackageReleaseNotes>
+    <PackageTags>f#;fable;fable-dotnet;fable-javascript;parser;fparsec</PackageTags>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <PackageId>TheBlunt</PackageId>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <Authors>Ronald Schlenker</Authors>
+    <Copyright>Copyright 2023 Ronald Schlenker</Copyright>
+    <PackageRequireLicenseAcceptance>true</PackageRequireLicenseAcceptance>
+    <!-- <PackageIcon>nuget_logo.png</PackageIcon> -->
+    <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
+    <PackageRequireLicenseAcceptance>true</PackageRequireLicenseAcceptance>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageProjectUrl>https://github.com/ronaldschlenker/TheBlunt</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/RonaldSchlenker/TheBlunt</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+  </PropertyGroup>
+
+</Project>
