@@ -35,11 +35,28 @@ type [<Struct>] ForControl<'v> =
     // | Fwd of offset:int
     // | Next
 
+open System.Runtime.CompilerServices
+
+[<Extension>]
+type StringExtensions =
+    [<Extension>]
+    static member eq(s: Str, compareWith: string) =
+        s.Span.SequenceEqual(compareWith.AsSpan())
+    [<Extension>]
+    static member eq(s: Str, compareWith: Str) =
+        s.Span.SequenceEqual(compareWith.Span)
+    [<Extension>]
+    static member eq(s: string, compareWith: Str) =
+        s.AsSpan().SequenceEqual(compareWith.Span)
+    [<Extension>]
+    static member eq(s: string, compareWith: string) =
+        String.Equals(s, compareWith)
+
 module Str =
     // TODO: Use Span
     let equalsAt(this: Str, index: int, compareWith: Str) =
         index + compareWith.Length <= this.Length
-        && this.Slice(index, compareWith.Length) = compareWith
+        && this.Slice(index, compareWith.Length).eq(compareWith)
     let empty = "".AsMemory()
 
 module Cursor =
@@ -115,8 +132,7 @@ let inline run (text: string) (parser: _ Parser) =
 
 let pstr (s: string) =
     mkParser <| fun inp ->
-        let s = s.AsMemory()
-        if Str.equalsAt(inp.text, inp.index, s)
+        if Str.equalsAt(inp.text, inp.index, s.AsMemory())
         then POk { index = inp.index + s.Length; value = s }
         else PError { index = inp.index; message = $"Expected: '{s}'" }
 
@@ -220,8 +236,8 @@ let parse = ParserBuilder()
 let panyChar =
     mkParser <| fun inp ->
         if inp.text |> Cursor.isAtEnd inp.index
-        then POk { index = inp.index; value = Str.empty }
-        else POk { index = inp.index + 1; value = inp.text.Slice(inp.index, 1) }
+        then POk { index = inp.index; value = "" }
+        else POk { index = inp.index + 1; value = inp.text.Slice(inp.index, 1).ToString() }
 
 let pend =
     mkParser <| fun inp ->
@@ -230,6 +246,7 @@ let pend =
         else PError { index = inp.index; message = "End of input." }
 
 let pblank = pstr " "
+// TODO: blankN
 
 /// Parse at least n or more blanks.
 let pblanks n =
@@ -245,20 +262,18 @@ let pblanks n =
 
 
 module Tests =
-    let r1 = pblanks 1 |> run "       xxx"
-    let r2 = pblanks 1 |> run "   xxx"
-    let r3 = pblanks 1 |> run " xxx"
-    let r4 = pblanks 0 |> run "xxx"
+    let r = pblanks 1 |> run "       xxx"
+    let r = pblanks 1 |> run "   xxx"
+    let r = pblanks 1 |> run " xxx"
+    let r = pblanks 1 |> run "xxx"
+    let r = pblanks 0 |> run "xxx"
 
-    let r5 =
+    let r =
         parse {
             for x in panyChar do
-                if x = "a" || x = "b" || x = "c" then 
+                if x.eq "a" || x.eq "b" || x.eq "c" then
                     yield Store x
-                elif x = "X" then
+                elif x.eq "X" then
                     yield Break
         }
         |> run "abcdeaXabb"
-
-let s = System.IO.File.ReadAllText(__SOURCE_DIRECTORY__ + "/Text.txt")
-let span = s.AsSpan().Slice(0, 10)
