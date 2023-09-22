@@ -45,29 +45,24 @@ module DocPos =
         let lineStart, columnStart = 1, 1
         let rec findLineAndColumn (currIdx: int) (line: int) (column: int) =
             match currIdx = index with
-            | true ->
-                { index = index
-                  line = line
-                  column = column }
+            | true -> { index = index; line = line; column = column }
             | false ->
                 let line, column =
-                    if input.EqualsAt(currIdx, "\n") then
-                        line + 1, columnStart
-                    else
-                        line, column + 1
+                    if input.EqualsAt(currIdx, "\n") 
+                    then line + 1, columnStart
+                    else line, column + 1
                 findLineAndColumn (currIdx + 1) line column
-
         findLineAndColumn 0 lineStart columnStart
 
     let ofInput (pi: ParserInput) = create pi.index pi.text
 
 let inline mkParser parser = Parser parser
+
 let inline getParser (Parser parser) = parser
 
 module BuilderBricks =
     let inline bind ([<InlineIfLambda>] f: 'a -> _ Parser) (parser: _ Parser) =
-        mkParser
-        <| fun inp ->
+        mkParser <| fun inp ->
             match (getParser parser) inp with
             | POk pRes ->
                 let fParser = getParser (f pRes.value)
@@ -76,17 +71,13 @@ module BuilderBricks =
             | PError error -> PError error
 
     let return' value =
-        mkParser
-        <| fun inp ->
-            POk
-                { index = inp.index
-                  value = value }
+        mkParser <| fun inp -> 
+            POk { index = inp.index; value = value }
 
     let zero = return' ()
 
     let combine (p1: _ Parser) (p2: _ Parser) reduction =
-        mkParser
-        <| fun inp ->
+        mkParser <| fun inp ->
             match (getParser p1) inp with
             | POk p1Res ->
                 let p2Res = (getParser p2) { inp with index = p1Res.index }
@@ -98,9 +89,10 @@ module BuilderBricks =
                 | PError error -> PError error
             | PError error -> PError error
 
+    // TODO: resolve whileCond / whileCanParse redundancy?
+
     let whileCond (guard: unit -> bool) body idElem reducer =
-        mkParser
-        <| fun inp ->
+        mkParser <| fun inp ->
             let rec iter currResults currIdx =
                 match guard () with
                 | true ->
@@ -109,16 +101,11 @@ module BuilderBricks =
                     | PError error -> PError error
                     | POk res ->
                         let hasConsumed = res.index > currIdx
-                        if hasConsumed then
-                            POk
-                                { index = currIdx
-                                  value = currResults }
-                        else
-                            iter (reducer res.value currResults) res.index
-                | false ->
-                    POk
-                        { index = currIdx
-                          value = currResults }
+                        if hasConsumed 
+                        then POk { index = currIdx; value = currResults }
+                        else iter (reducer res.value currResults) res.index
+                | false -> 
+                    POk { index = currIdx; value = currResults }
             iter idElem inp.index
 
     let whileCanParse (_: unit -> CanParse) body idElem reducer =
@@ -127,17 +114,11 @@ module BuilderBricks =
             let rec iter currResults currIdx =
                 let pBody = getParser (body ())
                 match pBody { inp with index = currIdx } with
-                | PError _ ->
-                    POk
-                        { index = currIdx
-                          value = currResults }
+                | PError _ -> POk { index = currIdx; value = currResults }
                 | POk res ->
                     let hasConsumed = res.index > currIdx
                     match hasConsumed with
-                    | false ->
-                        POk
-                            { index = currIdx
-                              value = currResults }
+                    | false -> POk { index = currIdx; value = currResults }
                     | true -> iter (reducer res.value currResults) res.index
             iter idElem inp.index
 
@@ -145,34 +126,32 @@ module BuilderBricks =
         let enum = sequence.GetEnumerator()
         whileCond (fun _ -> enum.MoveNext()) (fun () -> body enum.Current) idElem reducer
 
+    // let inline forParser (p: _ Parser) body idElem reducer =
+    //     let enum = sequence.GetEnumerator()
+    //     whileCond (fun _ -> enum.MoveNext()) (fun () -> body enum.Current) idElem reducer
+
 let inline run (text: string) (parser: _ Parser) =
-    let inp =
-        { index = 0
-          text = text }
+    let inp = { index = 0; text = text }
     match (getParser parser) inp with
     | POk res -> Ok res.value
     | PError error ->
         let docPos = DocPos.create error.index text
-        Error
-            {| pos = docPos
-               message = error.message |}
+        Error {| pos = docPos; message = error.message |}
 
 let pstr (s: string) =
     mkParser
     <| fun inp ->
         match inp.text.EqualsAt(inp.index, s) with
-        | true ->
-            POk
-                { index = inp.index + s.Length
-                  value = s }
-        | false ->
-            PError
-                { index = inp.index
-                  message = $"Expected: '{s}'" }
+        | true -> POk { index = inp.index + s.Length; value = s }
+        | false -> PError { index = inp.index; message = $"Expected: '{s}'" }
 
 let (~%) value = pstr value
 
-type ParserBuilderBase() =
+module Reducers =
+    let consReducer a b = a :: b
+    let inline plusReducer a b = a + b
+
+type ParserBuilder() =
     member inline _.Bind(p, [<InlineIfLambda>] f) = BuilderBricks.bind f p
     member _.Return(value) = BuilderBricks.return' value
     member _.ReturnFrom(value) = value
@@ -181,13 +160,6 @@ type ParserBuilderBase() =
     member _.Zero() = BuilderBricks.zero
     member _.Delay(f) = f
     member _.Run(f) = f ()
-
-module Reducers =
-    let consReducer a b = a :: b
-    let inline plusReducer a b = a + b
-
-type ParserBuilder() =
-    inherit ParserBuilderBase()
     member _.Combine(p1, fp2) = BuilderBricks.combine p1 (fp2 ()) Reducers.consReducer
     member _.While(guard: unit -> bool, body) =
         BuilderBricks.whileCond guard body [] Reducers.consReducer
@@ -195,18 +167,7 @@ type ParserBuilder() =
         BuilderBricks.whileCanParse guard body [] Reducers.consReducer
     member _.For(sequence: _ seq, body) = BuilderBricks.forSeq sequence body [] Reducers.consReducer
 
-type ParserReduceBuilder() =
-    inherit ParserBuilderBase()
-    member inline _.Combine(p1, fp2) = BuilderBricks.combine p1 (fp2 ()) Reducers.plusReducer
-    member inline _.While(guard: unit -> bool, body) =
-        BuilderBricks.whileCond guard body "" Reducers.plusReducer
-    member inline _.While(guard: unit -> CanParse, body) =
-        BuilderBricks.whileCanParse guard body "" Reducers.plusReducer
-    member inline _.For(sequence: _ seq, body) =
-        BuilderBricks.forSeq sequence body "" Reducers.plusReducer
-
 let parse = ParserBuilder()
-let joinParse = ParserReduceBuilder()
 
 let map proj (p: _ Parser) =
     parse {
@@ -222,7 +183,8 @@ let pignore (p: _ Parser) =
 
 let pblank = pstr " "
 
-// TODO: SepBy
+// TODO: sepBy
+// TODO: skipN
 
 //let puntil (until: _ Parser) =
 //    parse {
@@ -240,7 +202,6 @@ let pblanks1 =
     joinParse {
         let! b = % " "
         yield b
-
         while CanParse do
             let! x = % " "
             yield x
