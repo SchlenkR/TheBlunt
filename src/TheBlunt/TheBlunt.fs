@@ -25,21 +25,31 @@ type [<Struct>] DocPos =
 
 type CanParse = CanParse
 
-type ForControl<'v> =
-    | Store of 'v
-    | Goto of int
+type [<Struct>] ForControl<'v> =
+    | Store of value:'v
+    | Fwd of offset:int
     | Next
     | Break
 
-open System.Runtime.CompilerServices
+open System
 
-[<Extension>]
-type StringExtensions =
-    [<Extension>]
-    static member EqualsAt(value: string, index: int, compareWith: string) =
-        // TODO: Use Span
-        index + compareWith.Length <= value.Length
-        && value.Substring(index, compareWith.Length) = compareWith
+type String with
+    // TODO: Use Span
+    member this.EqualsAt(index: int, compareWith: string) =
+        index + compareWith.Length <= this.Length
+        && this.Substring(index, compareWith.Length) = compareWith
+
+module Cursor =
+    let canGoto (idx: int) (value: string) = 
+        idx >= 0 && idx <= value.Length
+    let isAtEnd (idx: int) (value: string) = 
+        idx = value.Length
+    let hasRest (idx: int) (value: string) = 
+        not (isAtEnd idx value) && canGoto idx value
+    let goto (idx: int) f (value: string) =
+        if canGoto idx value
+        then f idx
+        else PError { index = idx; message = $"Index {idx} is out of range of string of length {value.Length}." }
 
 // TODO: Perf: The parser combinators could track that, instead of computing it from scratch.
 module DocPos =
@@ -120,8 +130,8 @@ module BuilderBricks =
                     POk { index = currIdx; value = currResults }
                 | POk res ->
                     if hasConsumed res.index currIdx
-                    then printfn "JA"; iter (reducer res.value currResults) res.index
-                    else printfn "NO"; POk { index = currIdx; value = currResults }
+                    then iter (reducer res.value currResults) res.index
+                    else POk { index = currIdx; value = currResults }
             iter idElem inp.index
 
     let inline forSeq (sequence: _ seq) body idElem reducer =
@@ -137,21 +147,19 @@ module BuilderBricks =
                     let bodyP = body pRes.value
                     match getParser bodyP { inp with index = pRes.index } with
                     | PError err -> PError err
-                    | POk res ->
-                        match hasConsumed res.index currIdx with
+                    | POk bodyRes ->
+                        match hasConsumed bodyRes.index currIdx with
                         | false -> POk { index = currIdx; value = currResults }
                         | true ->
-                            match res.value with
-                            | Store v ->
-                                if hasConsumed pRes.index  currIdx
-                                then iter (reducer v currResults) pRes.index
-                                else POk { index = currIdx; value = currResults }
-                            | Goto idx ->
-                                if idx <= 0
-                                then failwith "Backward moving is not allowed"
-                                else iter currResults (pRes.index + idx)
-                            | Next -> iter currResults pRes.index
-                            | Break -> POk { index = currIdx; value = currResults }
+                            match bodyRes.value with
+                            | Store v -> iter (reducer v currResults) bodyRes.index
+                            | Fwd offset ->
+                                inp.text |> Cursor.goto (bodyRes.index + offset) (fun idx -> iter currResults idx)
+                            | Next ->
+                                if inp.text |> Cursor.isAtEnd bodyRes.index
+                                then POk { index = bodyRes.index; value = currResults }
+                                else iter currResults bodyRes.index
+                            | Break -> POk { index = bodyRes.index; value = currResults }
             iter idElem inp.index
 
 let inline run (text: string) (parser: _ Parser) =
@@ -223,9 +231,17 @@ let pblank = pstr " "
 
 let anyChar =
     mkParser <| fun inp ->
-        if inp.index < inp.text.Length
-        then POk { index = inp.index + 1; value = string inp.text[inp.index] }
-        else POk { index = inp.index; value = "" }
+        if inp.text |> Cursor.isAtEnd inp.index
+        then POk { index = inp.index; value = "" }
+        else 
+            printfn $"POS {inp.index + 1}"
+            POk { index = inp.index + 1; value = string inp.text[inp.index] }
+
+let pend =
+    mkParser <| fun inp ->
+        if inp.index = inp.text.Length - 1
+        then POk { index = inp.index + 1; value = () }
+        else PError { index = inp.index; message = "End of input." }
 
 /// Parse zero or more blanks.
 let pblanks =
@@ -244,6 +260,9 @@ let pblanks1 =
             yield x
     }
 
+
+
+
 module Tests =
     let res1 = pblanks1 |> run "   xxx"
     let res2 = pblanks1 |> run " xxx"
@@ -256,4 +275,4 @@ module Tests =
                 then yield (Store x)
                 else yield Next
         }
-        |> run "ababababab"
+        |> run "abababababa"
