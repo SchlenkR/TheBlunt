@@ -1,14 +1,18 @@
 ﻿module TheBlunt
 
+open System
+
 type [<Struct>] Parser<'value> = Parser of (ParserInput -> ParserResult<'value>)
 
 and [<Struct>] ParserInput =
     { index: int
-      text: string }
+      text: Str }
+
+and Str = ReadOnlyMemory<char>
 
 and [<Struct>] ParserResult<'out> =
-    | POk of ok:ParserResultValue<'out>
-    | PError of error:ParseError
+    | POk of ok: ParserResultValue<'out>
+    | PError of error: ParseError
 
 and [<Struct>] ParserResultValue<'out> =
     { index: int
@@ -31,41 +35,42 @@ type [<Struct>] ForControl<'v> =
     // | Fwd of offset:int
     // | Next
 
-open System
-
-type String with
+module Str =
     // TODO: Use Span
-    member this.EqualsAt(index: int, compareWith: string) =
+    let equalsAt(this: Str, index: int, compareWith: Str) =
         index + compareWith.Length <= this.Length
-        && this.Substring(index, compareWith.Length) = compareWith
+        && this.Slice(index, compareWith.Length) = compareWith
+    let empty = "".AsMemory()
 
 module Cursor =
-    let canGoto (idx: int) (value: string) = 
+    let canGoto (idx: int) (value: Str) = 
         idx >= 0 && idx <= value.Length
-    let isAtEnd (idx: int) (value: string) = 
+    let isAtEnd (idx: int) (value: Str) = 
         idx = value.Length
-    let isAtEndOrBeyond (idx: int) (value: string) = 
+    let isAtEndOrBeyond (idx: int) (value: Str) = 
         idx >= value.Length
-    let hasRest (idx: int) (value: string) = 
+    let hasRest (idx: int) (value: Str) = 
         not (isAtEnd idx value) && canGoto idx value
-    let goto (idx: int) f (value: string) =
+    let goto (idx: int) f (value: Str) =
         if canGoto idx value
         then f idx
-        else PError { index = idx; message = $"Index {idx} is out of range of string of length {value.Length}." }
+        else
+            let msg = $"Index {idx} is out of range of string of length {value.Length}."
+            PError  { index = idx; message = msg }
 
 // TODO: Perf: The parser combinators could track that, instead of computing it from scratch.
 module DocPos =
-    let create (index: int) (input: string) =
+    let create (index: int) (input: Str) =
         if index < 0 || index > input.Length then
             failwithf "Index %d is out of range of input string of length %d." index input.Length
-
+        
         let lineStart, columnStart = 1, 1
         let rec findLineAndColumn (currIdx: int) (line: int) (column: int) =
             match currIdx = index with
             | true -> { index = index; line = line; column = column }
             | false ->
                 let line, column =
-                    if input.EqualsAt(currIdx, "\n") 
+                    if Str.equalsAt(input, currIdx, "\n".AsMemory()) 
                     then line + 1, columnStart
                     else line, column + 1
                 findLineAndColumn (currIdx + 1) line column
@@ -101,6 +106,7 @@ let pignore (p: _ Parser) =
     p |> map (fun _ -> ())
 
 let inline run (text: string) (parser: _ Parser) =
+    let text = text.AsMemory()
     match getParser parser { index = 0; text = text } with
     | POk res -> Ok res.value
     | PError error ->
@@ -109,7 +115,8 @@ let inline run (text: string) (parser: _ Parser) =
 
 let pstr (s: string) =
     mkParser <| fun inp ->
-        if inp.text.EqualsAt(inp.index, s)
+        let s = s.AsMemory()
+        if Str.equalsAt(inp.text, inp.index, s)
         then POk { index = inp.index + s.Length; value = s }
         else PError { index = inp.index; message = $"Expected: '{s}'" }
 
@@ -195,8 +202,8 @@ type ParserBuilder() =
                             | Store v -> currResults <- reducer currResults [v]
                             | Break -> shouldBreak <- true
                         if shouldBreak || (inp.text |> Cursor.isAtEndOrBeyond bodyRes.index)
-                        then printfn "---BREAK"; POk { index = bodyRes.index; value = currResults }
-                        else printfn "---CONT"; iter currResults bodyRes.index
+                        then POk { index = bodyRes.index; value = currResults }
+                        else iter currResults bodyRes.index
             iter [] inp.index
 
 let parse = ParserBuilder()
@@ -213,8 +220,8 @@ let parse = ParserBuilder()
 let panyChar =
     mkParser <| fun inp ->
         if inp.text |> Cursor.isAtEnd inp.index
-        then POk { index = inp.index; value = "" }
-        else POk { index = inp.index + 1; value = string inp.text[inp.index] }
+        then POk { index = inp.index; value = Str.empty }
+        else POk { index = inp.index + 1; value = inp.text.Slice(inp.index, 1) }
 
 let pend =
     mkParser <| fun inp ->
@@ -224,8 +231,8 @@ let pend =
 
 let pblank = pstr " "
 
-/// Parse one or more blanks.
-let pblanksN n =
+/// Parse at least n or more blanks.
+let pblanks n =
     parse {
         for x in 1 .. n do
             yield! pstr " "
@@ -233,27 +240,25 @@ let pblanksN n =
             yield! pstr " "
     }
 
-let pblanks = pblanksN 0
-
-/// Parse one or more blanks.
-let pblanks1 = pblanksN 1
-
 // TODO: passable reduce function / Zero for builder, etc.
-
-
+// Name: Imparsible
 
 
 module Tests =
-    let r1 = pblanks1 |> run "       xxx"
-    let r2 = pblanks1 |> run "   xxx"
-    let r3 = pblanks1 |> run " xxx"
-    let r4 = pblanks1 |> run "xxx"
+    let r1 = pblanks 1 |> run "       xxx"
+    let r2 = pblanks 1 |> run "   xxx"
+    let r3 = pblanks 1 |> run " xxx"
+    let r4 = pblanks 0 |> run "xxx"
 
     let r5 =
         parse {
-            yield "a"
             for x in panyChar do
                 if x = "a" || x = "b" || x = "c" then 
                     yield Store x
+                elif x = "X" then
+                    yield Break
         }
-        |> run "abcde"
+        |> run "abcdeaXabb"
+
+let s = System.IO.File.ReadAllText(__SOURCE_DIRECTORY__ + "/Text.txt")
+let span = s.AsSpan().Slice(0, 10)
