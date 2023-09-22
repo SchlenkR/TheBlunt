@@ -27,9 +27,9 @@ type CanParse = CanParse
 
 type [<Struct>] ForControl<'v> =
     | Store of value:'v
-    | Fwd of offset:int
-    | Next
     | Break
+    // | Fwd of offset:int
+    // | Next
 
 open System
 
@@ -44,6 +44,8 @@ module Cursor =
         idx >= 0 && idx <= value.Length
     let isAtEnd (idx: int) (value: string) = 
         idx = value.Length
+    let isAtEndOrBeyond (idx: int) (value: string) = 
+        idx >= value.Length
     let hasRest (idx: int) (value: string) = 
         not (isAtEnd idx value) && canGoto idx value
     let goto (idx: int) f (value: string) =
@@ -75,96 +77,31 @@ let inline mkParser parser = Parser parser
 
 let inline getParser (Parser parser) = parser
 
-module BuilderBricks =
-    let hasConsumed lastIdx currIdx = lastIdx > currIdx
+let hasConsumed lastIdx currIdx = lastIdx > currIdx
 
-    let inline bind ([<InlineIfLambda>] f: 'a -> _ Parser) (parser: _ Parser) =
-        mkParser <| fun inp ->
-            match getParser parser inp with
-            | POk pRes ->
-                let fParser = getParser (f pRes.value)
-                fParser { inp with index = pRes.index }
-            | PError error -> PError error
+let inline bind ([<InlineIfLambda>] f: 'a -> _ Parser) (parser: _ Parser) =
+    mkParser <| fun inp ->
+        match getParser parser inp with
+        | PError error -> PError error
+        | POk pRes ->
+            let fParser = getParser (f pRes.value)
+            fParser { inp with index = pRes.index }
 
-    let return' value =
-        mkParser <| fun inp -> 
-            POk { index = inp.index; value = value }
+let return' value =
+    mkParser <| fun inp -> 
+        POk { index = inp.index; value = value }
 
-    let zero = return' ()
+let map proj (p: _ Parser) =
+    mkParser <| fun inp ->
+        match getParser p inp with
+        | PError error -> PError error
+        | POk pRes -> POk { index = pRes.index; value = proj pRes.value }
 
-    let combine (p1: _ Parser) (p2: _ Parser) reduction =
-        mkParser <| fun inp ->
-            match getParser p1 inp with
-            | POk p1Res ->
-                match getParser p2 { inp with index = p1Res.index } with
-                | POk p2Res ->
-                    POk
-                        { index = p2Res.index
-                          value = reduction p1Res.value p2Res.value }
-                | PError error -> PError error
-            | PError error -> PError error
-
-    // TODO: resolve whileCond / whileCanParse redundancy?
-
-    let whileCond (guard: unit -> bool) body idElem reducer =
-        mkParser <| fun inp ->
-            let rec iter currResults currIdx =
-                match guard () with
-                | true ->
-                    match getParser (body ()) { inp with index = currIdx } with
-                    | PError error -> PError error
-                    | POk res ->
-                        if hasConsumed res.index currIdx
-                        then iter (reducer res.value currResults) res.index
-                        else POk { index = currIdx; value = currResults }
-                | false -> 
-                    POk { index = currIdx; value = currResults }
-            iter idElem inp.index
-
-    // TODO: We really need that when we have a forParser?
-    let whileCanParse (_: unit -> CanParse) body idElem reducer =
-        mkParser <| fun inp ->
-            let rec iter currResults currIdx =
-                match getParser (body ()) { inp with index = currIdx } with
-                | PError _ -> 
-                    POk { index = currIdx; value = currResults }
-                | POk res ->
-                    if hasConsumed res.index currIdx
-                    then iter (reducer res.value currResults) res.index
-                    else POk { index = currIdx; value = currResults }
-            iter idElem inp.index
-
-    let inline forSeq (sequence: _ seq) body idElem reducer =
-        let enum = sequence.GetEnumerator()
-        whileCond (fun _ -> enum.MoveNext()) (fun () -> body enum.Current) idElem reducer
-
-    let inline forParser (parser: _ Parser) body idElem reducer =
-        mkParser <| fun inp ->
-            let rec iter currResults currIdx =
-                match getParser parser { inp with index = currIdx } with
-                | PError err -> PError err
-                | POk pRes ->
-                    let bodyP = body pRes.value
-                    match getParser bodyP { inp with index = pRes.index } with
-                    | PError err -> PError err
-                    | POk bodyRes ->
-                        match hasConsumed bodyRes.index currIdx with
-                        | false -> POk { index = currIdx; value = currResults }
-                        | true ->
-                            match bodyRes.value with
-                            | Store v -> iter (reducer v currResults) bodyRes.index
-                            | Fwd offset ->
-                                inp.text |> Cursor.goto (bodyRes.index + offset) (fun idx -> iter currResults idx)
-                            | Next ->
-                                if inp.text |> Cursor.isAtEnd bodyRes.index
-                                then POk { index = bodyRes.index; value = currResults }
-                                else iter currResults bodyRes.index
-                            | Break -> POk { index = bodyRes.index; value = currResults }
-            iter idElem inp.index
+let pignore (p: _ Parser) =
+    p |> map (fun _ -> ())
 
 let inline run (text: string) (parser: _ Parser) =
-    let inp = { index = 0; text = text }
-    match getParser parser inp with
+    match getParser parser { index = 0; text = text } with
     | POk res -> Ok res.value
     | PError error ->
         let docPos = DocPos.create error.index text
@@ -178,47 +115,91 @@ let pstr (s: string) =
 
 let (~%) value = pstr value
 
-module Reducers =
-    let consReducer a b = a :: b
-    let inline plusReducer a b = a + b
-
 type ParserBuilder() =
-    let reducer a b = a :: b
-    let reducerId = []
-    member inline _.Bind(p, [<InlineIfLambda>] f) = BuilderBricks.bind f p
-    member _.Return(value) = BuilderBricks.return' value
+    let reducer a b = [ yield! a; yield! b ]
+    member inline _.Bind(p, [<InlineIfLambda>] f) = bind f p
+    member _.Return(value) = return' value
     member _.ReturnFrom(value) = value
-    member _.Yield(value) = BuilderBricks.return' value
-    member _.YieldFrom(value) = value
-    member _.Zero() = BuilderBricks.zero
+    member _.Yield(value) = return' [value]
+    member _.YieldFrom(p: _ Parser) =
+        mkParser <| fun inp ->
+            let pRes = getParser p inp
+            match pRes with
+            | PError err -> PError err
+            | POk pRes -> POk { index = pRes.index; value = [pRes.value] }
+    member _.Zero() = return' []
     member _.Delay(f) = f
-    member _.Run(f) = f ()
+    member _.Run(f) = mkParser <| fun inp -> getParser (f ()) inp
+
     member _.Combine(p1, fp2) = 
-        BuilderBricks.combine p1 (fp2 ()) reducer
+        mkParser <| fun inp ->
+            let p2 = fp2 ()
+            match getParser p1 inp with
+            | POk p1Res ->
+                match getParser p2 { inp with index = p1Res.index } with
+                | POk p2Res ->
+                    POk
+                        { index = p2Res.index
+                          value = reducer p1Res.value p2Res.value }
+                | PError error -> PError error
+            | PError error -> PError error
+
+    // TODO: resolve whileCond / whileCanParse redundancy?
     member _.While(guard: unit -> bool, body) =
-        BuilderBricks.whileCond guard body reducerId reducer
+        mkParser <| fun inp ->
+            let rec iter currResults currIdx =
+                match guard () with
+                | true ->
+                    match getParser (body ()) { inp with index = currIdx } with
+                    | PError error -> PError error
+                    | POk res ->
+                        if hasConsumed res.index currIdx
+                        then iter (reducer currResults res.value) res.index
+                        else POk { index = currIdx; value = currResults }
+                | false -> 
+                    POk { index = currIdx; value = currResults }
+            iter [] inp.index
+
     member _.While(guard: unit -> CanParse, body) =
-        BuilderBricks.whileCanParse guard body reducerId reducer
-    member _.For(sequence: _ seq, body) =
-        BuilderBricks.forSeq sequence body reducerId reducer
-    member _.For(parser: _ Parser, body) =
-        BuilderBricks.forParser parser body reducerId reducer
+        mkParser <| fun inp ->
+            let rec iter currResults currIdx =
+                match getParser (body ()) { inp with index = currIdx } with
+                | PError _ -> 
+                    POk { index = currIdx; value = currResults }
+                | POk res ->
+                    if hasConsumed res.index currIdx
+                    then iter (reducer currResults res.value) res.index
+                    else POk { index = currIdx; value = currResults }
+            iter [] inp.index
+
+    member this.For(sequence: _ seq, body) =
+        let enum = sequence.GetEnumerator()
+        this.While(
+            (fun _ -> enum.MoveNext()),
+            (fun () -> body enum.Current))
+
+    member _.For(loopParser: 'a Parser, body: 'a -> Parser<ForControl<'b> list>) : Parser<'b list> =
+        mkParser <| fun inp ->
+            let rec iter currResults currIdx =
+                match getParser loopParser { inp with index = currIdx } with
+                | PError err -> PError err
+                | POk loopRes ->
+                    let bodyP = body loopRes.value
+                    match getParser bodyP { inp with index = loopRes.index } with
+                    | PError err -> PError err
+                    | POk bodyRes ->
+                        let mutable shouldBreak = false
+                        let mutable currResults = currResults
+                        for command in bodyRes.value do
+                            match command with
+                            | Store v -> currResults <- reducer currResults [v]
+                            | Break -> shouldBreak <- true
+                        if shouldBreak || (inp.text |> Cursor.isAtEndOrBeyond bodyRes.index)
+                        then printfn "---BREAK"; POk { index = bodyRes.index; value = currResults }
+                        else printfn "---CONT"; iter currResults bodyRes.index
+            iter [] inp.index
 
 let parse = ParserBuilder()
-
-let map proj (p: _ Parser) =
-    parse {
-        let! x = p
-        return proj x
-    }
-
-let pignore (p: _ Parser) =
-    parse {
-        let! _ = p
-        return ()
-    }
-
-let pblank = pstr " "
 
 // TODO: sepBy
 // TODO: skipN
@@ -229,13 +210,11 @@ let pblank = pstr " "
 //    parse {
 //    }
 
-let anyChar =
+let panyChar =
     mkParser <| fun inp ->
         if inp.text |> Cursor.isAtEnd inp.index
         then POk { index = inp.index; value = "" }
-        else 
-            printfn $"POS {inp.index + 1}"
-            POk { index = inp.index + 1; value = string inp.text[inp.index] }
+        else POk { index = inp.index + 1; value = string inp.text[inp.index] }
 
 let pend =
     mkParser <| fun inp ->
@@ -243,36 +222,38 @@ let pend =
         then POk { index = inp.index + 1; value = () }
         else PError { index = inp.index; message = "End of input." }
 
-/// Parse zero or more blanks.
-let pblanks =
-    parse {
-        while CanParse do
-            yield! % " "
-    }
+let pblank = pstr " "
 
 /// Parse one or more blanks.
-let pblanks1 =
+let pblanksN n =
     parse {
-        let! b = % " "
-        yield b
+        for x in 1 .. n do
+            yield! pstr " "
         while CanParse do
-            let! x = % " "
-            yield x
+            yield! pstr " "
     }
+
+let pblanks = pblanksN 0
+
+/// Parse one or more blanks.
+let pblanks1 = pblanksN 1
+
+// TODO: passable reduce function / Zero for builder, etc.
 
 
 
 
 module Tests =
-    let res1 = pblanks1 |> run "   xxx"
-    let res2 = pblanks1 |> run " xxx"
-    let res3 = pblanks1 |> run "xxx"
+    let r1 = pblanks1 |> run "       xxx"
+    let r2 = pblanks1 |> run "   xxx"
+    let r3 = pblanks1 |> run " xxx"
+    let r4 = pblanks1 |> run "xxx"
 
-    let res4 =
+    let r5 =
         parse {
-            for x in anyChar do
-                if x = "a"
-                then yield (Store x)
-                else yield Next
+            yield "a"
+            for x in panyChar do
+                if x = "a" || x = "b" || x = "c" then 
+                    yield Store x
         }
-        |> run "abababababa"
+        |> run "abcde"
