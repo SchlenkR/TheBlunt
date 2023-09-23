@@ -84,21 +84,21 @@ open System.Runtime.CompilerServices
 
 [<Extension>]
 type StringExtensions =
-    [<Extension>] static member inline ValueEquals(s: Str, compareWith: string)
+    [<Extension>] static member inline StringEquals(s: Str, compareWith: string)
         = s.Span.SequenceEqual(compareWith.AsSpan())
-    [<Extension>] static member inline ValueEquals(s: Str, compareWith: Str) 
+    [<Extension>] static member inline StringEquals(s: Str, compareWith: Str) 
         = s.Span.SequenceEqual(compareWith.Span)
-    [<Extension>] static member inline ValueEquals(s: string, compareWith: Str) 
+    [<Extension>] static member inline StringEquals(s: string, compareWith: Str) 
         = s.AsSpan().SequenceEqual(compareWith.Span)
-    [<Extension>] static member inline ValueEquals(s: string, compareWith: string) 
+    [<Extension>] static member inline StringEquals(s: string, compareWith: string)
         = String.Equals(s, compareWith)
-        
-    [<Extension>] static member ValueEqualsAt(this: Str, other: Str, idx: int) 
-        = 
-        idx + other.Length <= this.Length 
-        && this.Slice(idx, other.Length).ValueEquals(other)
-    [<Extension>] static member ValueEqualsAt(this: Str, other: string, idx: int) 
-        = this.ValueEqualsAt(other.AsMemory(), idx)
+
+    [<Extension>] static member StringStartsWithAt(this: Str, other: Str, idx: int)
+        =
+            idx + other.Length <= this.Length
+            && this.Slice(idx, other.Length).StringEquals(other)
+    [<Extension>] static member StringStartsWithAt(this: Str, other: string, idx: int) 
+        = this.StringStartsWithAt(other.AsMemory(), idx)
 
 module Str =
     let empty = "".AsMemory()
@@ -124,7 +124,7 @@ module DocPos =
             | true -> { idx = index; ln = line; col = column }
             | false ->
                 let line, column =
-                    if input.ValueEqualsAt("\n".AsMemory(), currIdx)
+                    if input.StringStartsWithAt("\n".AsMemory(), currIdx)
                     then line + 1, columnStart
                     else line, column + 1
                 findLineAndColumn (currIdx + 1) line column
@@ -269,7 +269,7 @@ let pignore (p: Parser<_,_>) =
 
 let pstr<'s> (s: string) =
     mkParser <| fun inp (state: 's) ->
-        if inp.text.ValueEqualsAt(s, inp.idx)
+        if inp.text.StringStartsWithAt(s, inp.idx)
         then POk { idx = inp.idx + s.Length; result = s }
         else PError { idx = inp.idx; message = $"Expected: '{s}'" }
 
@@ -282,14 +282,24 @@ let goto (idx: int) =
             let msg = $"Index {idx} is out of range of string of length {inp.text.Length}."
             PError { idx = idx; message = msg }
 
-let por a b =
+let pAorB a b =
     mkParser <| fun inp state ->
         match getParser a inp state with
         | POk res -> POk res
         | PError _ -> getParser b inp state
-let ( <|> ) a b = por a b
+let ( <|> ) a b = pAorB a b
 
-let pchoose parsers = parsers |> List.reduce por
+let pAandB a b =
+    mkParser <| fun inp state ->
+        match getParser a inp state with
+        | POk ares ->
+            match getParser b { inp with idx = ares.idx } state with
+            | POk bres -> POk { idx = bres.idx; result = (ares.result, bres.result) } 
+            | PError error -> PError error
+        | PError error -> PError error
+let ( <&> ) a b = pAandB a b
+
+let pfirst parsers = parsers |> List.reduce pAorB
 
 // TODO: sepBy
 // TODO: skipN
@@ -311,7 +321,6 @@ let pend<'s> =
         else PError { idx = inp.idx; message = "End of input." }
 
 let pblank<'s> = pstr<'s> " "
-// TODO: blankN
 
 /// Parse at least n or more blanks.
 let pblanks n =
@@ -324,6 +333,16 @@ let pblanks n =
         return! State.flush
     }
 
+let psepByP (sep: Parser<_,_>) (p: Parser<_,_>) =
+    parse {
+        let! x = p
+        let! xs = parse {
+            for x in sep do
+                let! x = p
+                return! x
+        }
+        return! x :: xs
+    }
 
 // let pSepByStr (p: Parser<_,_>) (sep: Parser<_,_>) =
 //     parse {
