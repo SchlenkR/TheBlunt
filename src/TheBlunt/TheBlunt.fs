@@ -83,29 +83,35 @@ open System.Runtime.CompilerServices
 
 [<Extension>]
 type StringExtensions =
-    [<Extension>] static member inline StringEquals(s: Str, compareWith: string)
-        = s.SequenceEqual(compareWith.AsSpan())
-    [<Extension>] static member inline StringEquals(s: Str, compareWith: Str) 
-        = s.SequenceEqual(compareWith)
-    [<Extension>] static member inline StringEquals(s: string, compareWith: Str) 
-        = s.AsSpan().SequenceEqual(compareWith)
-    [<Extension>] static member inline StringEquals(s: string, compareWith: string)
-        = String.Equals(s, compareWith)
+    [<Extension>] 
+    static member inline StringEquals(s: Str, compareWith: string) = 
+        s.SequenceEqual(compareWith.AsSpan())
+    [<Extension>] 
+    static member inline StringEquals(s: Str, compareWith: Str) =
+        s.SequenceEqual(compareWith)
+    [<Extension>] 
+    static member inline StringEquals(s: string, compareWith: Str)  =
+        s.AsSpan().SequenceEqual(compareWith)
+    [<Extension>] 
+    static member inline StringEquals(s: string, compareWith: string) = 
+        String.Equals(s, compareWith)
 
-    [<Extension>] static member StringStartsWithAt(this: Str, other: Str, idx: int)
-        =
+    [<Extension>] 
+    static member StringStartsWithAt(this: Str, other: Str, idx: int) =
         idx + other.Length <= this.Length
         && this.Slice(idx, other.Length).StringEquals(other)
-    [<Extension>] static member StringStartsWithAt(this: Str, other: string, idx: int) 
-        = this.StringStartsWithAt(other.AsSpan(), idx)
-    [<Extension>] static member StringStartsWithAt(this: string, other: string, idx: int) 
-        = this.AsSpan().StringStartsWithAt(other.AsSpan(), idx)
+    [<Extension>] 
+    static member StringStartsWithAt(this: Str, other: string, idx: int) =
+        this.StringStartsWithAt(other.AsSpan(), idx)
+    [<Extension>] 
+    static member StringStartsWithAt(this: string, other: string, idx: int) =
+        this.AsSpan().StringStartsWithAt(other.AsSpan(), idx)
 
 type Cursor with
     member c.CanGoto(idx: int) =
         // TODO: Should be: Only forward
-        idx >= 0 && idx <= c.Original.Length
-    member c.CanWalk(steps: int) = c.CanGoto(c.Idx + steps)
+        idx >= c.Idx && idx <= c.Original.Length
+    member c.CanWalkFwd(steps: int) = c.CanGoto(c.Idx + steps)
     member c.IsAtEnd = c.Idx = c.Original.Length
     member c.HasRest = c.Idx < c.Original.Length
     member c.Rest = c.Original.AsSpan().Slice(c.Idx)
@@ -221,9 +227,11 @@ type ParserBuilder() =
                             let continue' =
                                 if hasConsumed bodyRes.idx currIdx
                                 then Some bodyRes.idx
-                                elif inp.Goto(bodyRes.idx).CanWalk(1) 
-                                then Some (bodyRes.idx + 1)
-                                else None
+                                else
+                                    let nextIdx = bodyRes.idx + 1
+                                    if inp.CanGoto(nextIdx)
+                                    then Some nextIdx
+                                    else None
                             match continue' with
                             | Some idx -> iter idx
                             | None -> pok ()
