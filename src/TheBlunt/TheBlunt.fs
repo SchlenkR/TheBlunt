@@ -62,20 +62,23 @@ type ForState() =
         do sb.Append(value) |> ignore
         do isFlushed <- false
     let addItem item = items <- item :: items
-    let appendStateItem () = addItem (sb.ToString())
+    let appendStateItem clear = 
+        do addItem (sb.ToString())
+        if clear then
+            do sb.Clear() |> ignore
+            do isFlushed <- true
     let flush () =
         if not isFlushed then
-            do appendStateItem ()
-            do isFlushed <- true
+            do appendStateItem true
         let res = items |> List.rev
-        do items <- []
+        printfn "Flushed: %A" res
         res
 
     member val Stop = false with get, set
     member _.AppendValue(value) : unit = appendValue value
     member _.Flush() = flush ()
     member _.AddItem(item) = addItem item
-    member _.AppendStateItem() = appendStateItem ()
+    member _.AppendStateItem(clear) = appendStateItem clear
 
 open System.Runtime.CompilerServices
 
@@ -174,7 +177,6 @@ type ParserBuilder() =
     member _.Delay(f) = f
     member _.Run(f) = 
         mkParser <| fun inp state ->
-            printfn "--------- RUN ----------"
             getParser (f ()) inp state
     member _.Combine(p1, fp2) = 
         mkParser <| fun inp state ->
@@ -233,7 +235,7 @@ type ParserBuilder() =
 let parse = ParserBuilder()
 
 module State =
-    let stop =
+    let breakLoop =
         mkParser <| fun inp (state: ForState) ->
             state.Stop <- true
             POk { idx = inp.idx; result = () }
@@ -245,9 +247,9 @@ module State =
         mkParser <| fun inp (state: ForState) ->
             do state.AddItem(s)
             POk { idx = inp.idx; result = () }
-    let yieldState =
+    let yieldState clear =
         mkParser <| fun inp (state: ForState) ->
-            do state.AppendStateItem()
+            do state.AppendStateItem clear
             POk { idx = inp.idx; result = () }
     let getState =
         mkParser <| fun inp (state: ForState) ->
@@ -265,8 +267,8 @@ let map proj (p: Parser<_,_>) =
 let pignore (p: Parser<_,_>) =
     p |> map (fun _ -> ())
 
-let pstr (s: string) =
-    mkParser <| fun inp state ->
+let pstr<'s> (s: string) =
+    mkParser <| fun inp (state: 's) ->
         if inp.text.ValueEqualsAt(s, inp.idx)
         then POk { idx = inp.idx + s.Length; result = s }
         else PError { idx = inp.idx; message = $"Expected: '{s}'" }
@@ -308,18 +310,20 @@ let pend<'s> =
         then POk { idx = inp.idx + 1; result = () }
         else PError { idx = inp.idx; message = "End of input." }
 
-let pblank<'s> = pstr " "
+let pblank<'s> = pstr<'s> " "
 // TODO: blankN
 
 /// Parse at least n or more blanks.
 let pblanks n =
     parse {
         for x in 1 .. n do
-            let! c = pstr " "
+            let! c = pblank
             do! State.appendString c
-        for x in pstr " " do
+        for x in pblank do
             do! State.appendString x
+        return! State.flush
     }
+
 
 // let pSepByStr (p: Parser<_,_>) (sep: Parser<_,_>) =
 //     parse {
@@ -329,44 +333,40 @@ let pblanks n =
 // TODO: passable reduce function / Zero for builder, etc.
 // Name: Imparsible
 
+module Expect =
+    let ok expected res =
+        match res with
+        | Ok res ->
+            if res <> expected then
+                failwithf "Expected: %A, but got: %A" expected res
+        | Error err -> failwithf "Expected: %A, but got error: %A" expected err
+    let error res =
+        match res with
+        | Ok res -> failwithf "Expected to fail, but got: %A" res
+        | Error _ -> ()
+
 
 module Tests =
-    let r = pblank |> run "   "
-    let r = pblank |> run " "
-    let r = pblank |> run "x"
-    let r = pblank |> run ""
-    
-    let r = pblanks 1 |> run "   xxx"
-    let r = pblanks 1 |> run "  xxx"
-    let r = pblanks 1 |> run " xxx"
-    let r = pblanks 1 |> run "xxx"
-    let r = pblanks 0 |> run "xxx"
 
-    let r =
-        parse {
-            for x in panyChar do
-                if x = "a" || x = "b" || x = "c" then
-                    do! State.appendString x
-                elif x = "X" then
-                    do! State.stop
-        }
-        |> run "abcdeaXabb"
-
+    pblank |> run "   " |> Expect.ok " "
+    pblank |> run " "   |> Expect.ok " "
+    pblank |> run "x"   |> Expect.error
+    pblank |> run ""    |> Expect.error
     
-    /// Parse at least n or more blanks.
-    let pblanksAlternative n =
-        parse {
-            for x in 1 .. n do
-                let! c = pstr " "
-                do! State.appendString c
-            for x in panyChar do
+    pblanks 1 |> run "   xxx" |> Expect.ok ["   "]
+    pblanks 1 |> run "  xxx"  |> Expect.ok ["  "]
+    pblanks 1 |> run " xxx"   |> Expect.ok [" "]
+    pblanks 1 |> run "xxx"    |> Expect.error
+    pblanks 0 |> run "xxx"    |> Expect.ok []
+
+    parse {
+        for x in panyChar do
+            if x = "a" || x = "b" || x = "c" then
                 do! State.appendString x
-            return! State.flush
-        }
+            elif x = "X" then
+                do! State.breakLoop
+        return! State.flush
+    }
+    |> run "abcdeaXabb"
+    |> Expect.ok ["abca"]
 
-
-    let r = pblanksAlternative 1 |> run "       xxx"
-    let r = pblanksAlternative 1 |> run "   xxx"
-    let r = pblanksAlternative 1 |> run " xxx"
-    let r = pblanksAlternative 1 |> run "xxx"
-    let r = pblanksAlternative 0 |> run "xxx"
