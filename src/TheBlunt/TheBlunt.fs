@@ -2,9 +2,9 @@
 
 open System
 
-type [<Struct>] Parser<'value> = Parser of (ParserInput -> ParserResult<'value>)
+type ParserFunction<'value> = Cursor -> ParserResult<'value>
 
-and [<Struct>] ParserInput =
+and [<Struct>] Cursor =
     { index: int
       text: Str }
 
@@ -22,6 +22,32 @@ and [<Struct>] ParseError =
     { index: int
       message: string }
 
+#if USE_INLINEIFLAMBDA
+
+type Parser<'value> = ParserFunction<'value>
+
+[<AutoOpen>]
+module ParserHandling =
+    let inline mkParser (parser: _ Parser) = parser
+    let inline getParser (parser: _ Parser) = parser
+
+module Inline =
+    type IfLambdaAttribute = FSharp.Core.InlineIfLambdaAttribute
+
+#else
+
+type Parser<'value> = Parser of ParserFunction<'value>
+
+[<AutoOpen>]
+module ParserHandling =
+    let inline mkParser parserFunction = Parser parserFunction
+    let inline getParser (parser: _ Parser) = let (Parser p) = parser in p
+
+module Inline =
+    type IfLambdaAttribute() = inherit System.Attribute()
+
+#endif
+
 type [<Struct>] DocPos =
     { index: int
       line: int
@@ -29,8 +55,9 @@ type [<Struct>] DocPos =
 
 type CanParse = CanParse
 
-type [<Struct>] ForControl<'v> =
-    | Store of value:'v
+type [<Struct>] ForControl<'item> =
+    | Item of item:'item
+    | Append of value:'item
     | Break
     // | Fwd of offset:int
     // | Next
@@ -39,40 +66,35 @@ open System.Runtime.CompilerServices
 
 [<Extension>]
 type StringExtensions =
-    [<Extension>]
-    static member eq(s: Str, compareWith: string) =
-        s.Span.SequenceEqual(compareWith.AsSpan())
-    [<Extension>]
-    static member eq(s: Str, compareWith: Str) =
-        s.Span.SequenceEqual(compareWith.Span)
-    [<Extension>]
-    static member eq(s: string, compareWith: Str) =
-        s.AsSpan().SequenceEqual(compareWith.Span)
-    [<Extension>]
-    static member eq(s: string, compareWith: string) =
-        String.Equals(s, compareWith)
+    [<Extension>] static member Equals(s: Str, compareWith: string)
+        = s.Span.SequenceEqual(compareWith.AsSpan())
+    [<Extension>] static member Equals(s: Str, compareWith: Str) 
+        = s.Span.SequenceEqual(compareWith.Span)
+    [<Extension>] static member Equals(s: string, compareWith: Str) 
+        = s.AsSpan().SequenceEqual(compareWith.Span)
+    [<Extension>] static member Equals(s: string, compareWith: string) 
+        = String.Equals(s, compareWith)
+    [<Extension>] static member EqualsAt(this: Str, other: Str, idx: int) 
+        = idx + other.Length <= this.Length && this.Slice(idx, other.Length).Equals(other)
 
 module Str =
-    // TODO: Use Span
-    let equalsAt(this: Str, index: int, compareWith: Str) =
-        index + compareWith.Length <= this.Length
-        && this.Slice(index, compareWith.Length).eq(compareWith)
     let empty = "".AsMemory()
 
-module Cursor =
-    let canGoto (idx: int) (value: Str) = 
-        idx >= 0 && idx <= value.Length
-    let isAtEnd (idx: int) (value: Str) = 
-        idx = value.Length
-    let isAtEndOrBeyond (idx: int) (value: Str) = 
-        idx >= value.Length
-    let hasRest (idx: int) (value: Str) = 
-        not (isAtEnd idx value) && canGoto idx value
-    let goto (idx: int) f (value: Str) =
-        if canGoto idx value
+type Cursor with
+    static member Create(text, idx) = { index = idx; text = text }
+    member c.CanGoto(idx: int) =
+        // TODO: Should be: Only forward
+        idx >= 0 && idx <= c.text.Length
+    member c.IsAtEnd =
+        c.index = c.text.Length
+    member c.HasRest = c.index < c.text.Length
+    // TODO: This should be a "pgoto" parser
+    member c.Goto(idx: int, f) =
+        // TODO: this propably would be a fatal, most propably an unexpected error
+        if c.CanGoto(idx)
         then f idx
         else
-            let msg = $"Index {idx} is out of range of string of length {value.Length}."
+            let msg = $"Index {idx} is out of range of string of length {c.text.Length}."
             PError  { index = idx; message = msg }
 
 // TODO: Perf: The parser combinators could track that, instead of computing it from scratch.
@@ -87,17 +109,13 @@ module DocPos =
             | true -> { index = index; line = line; column = column }
             | false ->
                 let line, column =
-                    if Str.equalsAt(input, currIdx, "\n".AsMemory()) 
+                    if input.EqualsAt("\n".AsMemory(), currIdx)
                     then line + 1, columnStart
                     else line, column + 1
                 findLineAndColumn (currIdx + 1) line column
         findLineAndColumn 0 lineStart columnStart
 
-    let ofInput (pi: ParserInput) = create pi.index pi.text
-
-let inline mkParser parser = Parser parser
-
-let inline getParser (Parser parser) = parser
+    let ofInput (pi: Cursor) = create pi.index pi.text
 
 let hasConsumed lastIdx currIdx = lastIdx > currIdx
 
@@ -132,14 +150,16 @@ let inline run (text: string) (parser: _ Parser) =
 
 let pstr (s: string) =
     mkParser <| fun inp ->
-        if Str.equalsAt(inp.text, inp.index, s.AsMemory())
+        if inp.text.EqualsAt(s.AsMemory(), inp.index)
         then POk { index = inp.index + s.Length; value = s }
         else PError { index = inp.index; message = $"Expected: '{s}'" }
 
 let (~%) value = pstr value
 
 type ParserBuilder() =
-    let reducer a b = [ yield! a; yield! b ]
+    let combineItem a b = [ yield! a; yield! b ]
+    let appendItem a b = [ yield! a; yield! b ]
+
     member inline _.Bind(p, [<InlineIfLambda>] f) = bind f p
     member _.Return(value) = return' value
     member _.ReturnFrom(value) = value
@@ -163,7 +183,7 @@ type ParserBuilder() =
                 | POk p2Res ->
                     POk
                         { index = p2Res.index
-                          value = reducer p1Res.value p2Res.value }
+                          value = combineItem p1Res.value p2Res.value }
                 | PError error -> PError error
             | PError error -> PError error
 
@@ -177,7 +197,7 @@ type ParserBuilder() =
                     | PError error -> PError error
                     | POk res ->
                         if hasConsumed res.index currIdx
-                        then iter (reducer currResults res.value) res.index
+                        then iter (combineItem currResults res.value) res.index
                         else POk { index = currIdx; value = currResults }
                 | false -> 
                     POk { index = currIdx; value = currResults }
@@ -191,7 +211,7 @@ type ParserBuilder() =
                     POk { index = currIdx; value = currResults }
                 | POk res ->
                     if hasConsumed res.index currIdx
-                    then iter (reducer currResults res.value) res.index
+                    then iter (combineItem currResults res.value) res.index
                     else POk { index = currIdx; value = currResults }
             iter [] inp.index
 
@@ -215,9 +235,10 @@ type ParserBuilder() =
                         let mutable currResults = currResults
                         for command in bodyRes.value do
                             match command with
-                            | Store v -> currResults <- reducer currResults [v]
+                            | Item item -> currResults <- combineItem currResults [item]
+                            | Append x -> failwith "TODO"
                             | Break -> shouldBreak <- true
-                        if shouldBreak || (inp.text |> Cursor.isAtEndOrBeyond bodyRes.index)
+                        if shouldBreak || inp.IsAtEnd
                         then POk { index = bodyRes.index; value = currResults }
                         else iter currResults bodyRes.index
             iter [] inp.index
@@ -235,7 +256,7 @@ let parse = ParserBuilder()
 
 let panyChar =
     mkParser <| fun inp ->
-        if inp.text |> Cursor.isAtEnd inp.index
+        if inp.IsAtEnd
         then POk { index = inp.index; value = "" }
         else POk { index = inp.index + 1; value = inp.text.Slice(inp.index, 1).ToString() }
 
@@ -257,6 +278,11 @@ let pblanks n =
             yield! pstr " "
     }
 
+// let pSepByStr (p: _ Parser) (sep: _ Parser) =
+//     parse {
+//         for x
+//     }
+
 // TODO: passable reduce function / Zero for builder, etc.
 // Name: Imparsible
 
@@ -271,9 +297,9 @@ module Tests =
     let r =
         parse {
             for x in panyChar do
-                if x.eq "a" || x.eq "b" || x.eq "c" then
-                    yield Store x
-                elif x.eq "X" then
+                if x = "a" || x = "b" || x = "c" then
+                    yield Item x
+                elif x = "X" then
                     yield Break
         }
         |> run "abcdeaXabb"
