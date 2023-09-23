@@ -16,23 +16,11 @@ and [<Struct>] ParserResult<'out> =
 
 and [<Struct>] ParserResultValue<'out> =
     { idx: int
-      value: 'out }
+      result: 'out }
 
 and [<Struct>] ParseError =
     { idx: int
       message: string }
-
-type [<Struct>] DocPos =
-    { idx: int
-      ln: int
-      col: int }
-
-type ForState<'i, 'v>(appendValue, getItems, addItem, appendStateItem) =
-    member val Stop = false with get, set
-    member _.AppendValue(value: 'v) : unit = appendValue value
-    member _.Items : list<'i> = getItems ()
-    member _.AddItem(item: 'i) : unit = addItem item
-    member _.AppendStateItem() : unit = appendStateItem ()
 
 #if USE_SINGLE_CASE_DU
 
@@ -59,6 +47,35 @@ module Inline =
     type IfLambdaAttribute = FSharp.Core.InlineIfLambdaAttribute
 
 #endif
+
+type [<Struct>] DocPos =
+    { idx: int
+      ln: int
+      col: int }
+
+type ForState() =
+    let sb = System.Text.StringBuilder()
+    let mutable items = []
+    let mutable isFlushed = true
+    
+    let appendValue (value: string) =
+        do sb.Append(value) |> ignore
+        do isFlushed <- false
+    let addItem item = items <- item :: items
+    let appendStateItem () = addItem (sb.ToString())
+    let flush () =
+        if not isFlushed then
+            do appendStateItem ()
+            do isFlushed <- true
+        let res = items |> List.rev
+        do items <- []
+        res
+
+    member val Stop = false with get, set
+    member _.AppendValue(value) : unit = appendValue value
+    member _.Flush() = flush ()
+    member _.AddItem(item) = addItem item
+    member _.AppendStateItem() = appendStateItem ()
 
 open System.Runtime.CompilerServices
 
@@ -119,17 +136,25 @@ let inline bind ([<InlineIfLambda>] f: 'a -> Parser<_,_>) (parser: Parser<_,_>) 
         match getParser parser inp state with
         | PError error -> PError error
         | POk pRes ->
-            let fParser = getParser (f pRes.value)
+            let fParser = getParser (f pRes.result)
             fParser { inp with idx = pRes.idx } state
 
 let return' value =
     mkParser <| fun inp state -> 
-        POk { idx = inp.idx; value = value }
+        POk { idx = inp.idx; result = value }
+
+let pseq (s: _ seq) =
+    let enum = s.GetEnumerator()
+    mkParser <| fun inp state ->
+        if enum.MoveNext()
+        then POk { idx = inp.idx; result = enum.Current }
+        else PError { idx = inp.idx; message = "No more elements in sequence." }
 
 let inline run (text: string) (parser: Parser<_,_>) =
     let text = text.AsMemory()
-    match getParser parser { idx = 0; text = text } () with
-    | POk res -> Ok res.value
+    let state = ForState()
+    match getParser parser { idx = 0; text = text } state with
+    | POk res -> Ok res.result
     | PError error ->
         let docPos = DocPos.create error.idx text
         Error {| pos = docPos; message = error.message |}
@@ -138,17 +163,18 @@ type ParserBuilder() =
     member inline _.Bind(p, [<InlineIfLambda>] f) = bind f p
     member _.Return(value) = return' value
     member _.ReturnFrom(value) = value
-    member _.Yield(value) = return' [value]
-    member _.YieldFrom(p: Parser<_,_>) =
-        mkParser <| fun inp state ->
-            let pRes = getParser p inp state
-            match pRes with
-            | PError err -> PError err
-            | POk pRes -> POk { idx = pRes.idx; value = [pRes.value] }
+    // member _.Yield(value) = return' [value]
+    // member _.YieldFrom(p: Parser<_,_>) =
+    //     mkParser <| fun inp state ->
+    //         let pRes = getParser p inp state
+    //         match pRes with
+    //         | PError err -> PError err
+    //         | POk pRes -> POk { idx = pRes.idx; result = [pRes.result] }
     member _.Zero() = return' ()
     member _.Delay(f) = f
     member _.Run(f) = 
         mkParser <| fun inp state ->
+            printfn "--------- RUN ----------"
             getParser (f ()) inp state
     member _.Combine(p1, fp2) = 
         mkParser <| fun inp state ->
@@ -159,7 +185,7 @@ type ParserBuilder() =
                 | POk p2Res ->
                     POk
                         { idx = p2Res.idx
-                          value = List.append p1Res.value p2Res.value }
+                          result = List.append p1Res.result p2Res.result }
                 | PError error -> PError error
             | PError error -> PError error
     member _.While(guard, body) =
@@ -171,40 +197,26 @@ type ParserBuilder() =
                     | PError error -> PError error
                     | POk res ->
                         if hasConsumed res.idx currIdx
-                        then iter (List.append currResults res.value) res.idx
-                        else POk { idx = currIdx; value = currResults }
+                        then iter (List.append currResults res.result) res.idx
+                        else POk { idx = currIdx; result = currResults }
                 | false -> 
-                    POk { idx = currIdx; value = currResults }
+                    POk { idx = currIdx; result = currResults }
             iter [] inp.idx
-    // Should that work similar to the ForParser overload (like "yield Item x")?
-    member this.For(sequence: _ seq, body) =
-        let enum = sequence.GetEnumerator()
-        this.While(
-            (fun _ -> enum.MoveNext()),
-            (fun () -> body enum.Current))
-    member _.For(loopParser, body: _ -> Parser<unit,_>) =
-        mkParser <| fun inp state ->
+    member _.For(loopParser, body: _ -> Parser<_,_>) =
+        mkParser <| fun inp (state: ForState) ->
             // TODO: This is hardcoced and specialized for Strings
-            let forState =
-                let sb = System.Text.StringBuilder()
-                let items = ResizeArray<string>()
-                let appendValue (value: string) = sb.Append(value) |> ignore
-                let getItems () = [ yield! items ]
-                let addItem item = items.Add(item) |> ignore
-                let appendStateItem () = items.Add(sb.ToString()) |> ignore
-                ForState(appendValue, getItems, addItem, appendStateItem)
             let rec iter currIdx =
+                let pok idx = POk { idx = idx; result = [] }
                 match getParser loopParser { inp with idx = currIdx } state with
-                | PError err -> 
-                    POk { idx = currIdx; value = forState.Items }
+                | PError err -> pok currIdx
                 | POk loopRes ->
-                    let bodyP = body loopRes.value
-                    match getParser bodyP { inp with idx = loopRes.idx } forState with
+                    let bodyP = body loopRes.result
+                    match getParser bodyP { inp with idx = loopRes.idx } state with
                     | PError err -> PError err
                     | POk bodyRes ->
-                        let ok () = POk { idx = bodyRes.idx; value = forState.Items } // TODO: Perf
-                        match forState.Stop || inp.IsAtEnd with
-                        | true -> ok ()
+                        let pok () = pok bodyRes.idx
+                        match state.Stop || inp.IsAtEnd with
+                        | true -> pok ()
                         | false ->
                             let continue' =
                                 if hasConsumed bodyRes.idx currIdx
@@ -214,51 +226,55 @@ type ParserBuilder() =
                                 else None
                             match continue' with
                             | Some idx -> iter idx
-                            | None -> ok ()
+                            | None -> pok ()
             iter inp.idx
+    member this.For(sequence: _ seq, body) = this.For(pseq sequence, body)
 
 let parse = ParserBuilder()
 
-module For =
-    let stop<'i,'v> =
-        mkParser <| fun inp (state: ForState<'i,'v>) ->
+module State =
+    let stop =
+        mkParser <| fun inp (state: ForState) ->
             state.Stop <- true
-            POk { idx = inp.idx; value = () }
+            POk { idx = inp.idx; result = () }
     let appendString (s: string) =
-        mkParser <| fun inp (state: ForState<_,_>) ->
+        mkParser <| fun inp (state: ForState) ->
             do state.AppendValue(s)
-            POk { idx = inp.idx; value = () }
+            POk { idx = inp.idx; result = () }
     let yieldItem (s: string) =
-        mkParser <| fun inp (state: ForState<_,_>) ->
+        mkParser <| fun inp (state: ForState) ->
             do state.AddItem(s)
-            POk { idx = inp.idx; value = () }
-    let yieldState<'i,'v> =
-        mkParser <| fun inp (state: ForState<'i,'v>) ->
+            POk { idx = inp.idx; result = () }
+    let yieldState =
+        mkParser <| fun inp (state: ForState) ->
             do state.AppendStateItem()
-            POk { idx = inp.idx; value = () }
-    let getState<'i,'v> =
-        mkParser <| fun inp (state: ForState<'i,'v>) ->
-            POk { idx = inp.idx; value = state }
+            POk { idx = inp.idx; result = () }
+    let getState =
+        mkParser <| fun inp (state: ForState) ->
+            POk { idx = inp.idx; result = state }
+    let flush =
+        mkParser <| fun inp (state: ForState) ->
+            POk { idx = inp.idx; result = state.Flush() }
 
 let map proj (p: Parser<_,_>) =
     mkParser <| fun inp state ->
         match getParser p inp state with
         | PError error -> PError error
-        | POk pRes -> POk { idx = pRes.idx; value = proj pRes.value }
+        | POk pRes -> POk { idx = pRes.idx; result = proj pRes.result }
 
 let pignore (p: Parser<_,_>) =
     p |> map (fun _ -> ())
 
 let pstr (s: string) =
-    mkParser <| fun inp (state: unit) ->
+    mkParser <| fun inp state ->
         if inp.text.ValueEqualsAt(s, inp.idx)
-        then POk { idx = inp.idx + s.Length; value = s }
+        then POk { idx = inp.idx + s.Length; result = s }
         else PError { idx = inp.idx; message = $"Expected: '{s}'" }
 
 let goto (idx: int) =
-    mkParser <| fun inp (state: unit) ->
+    mkParser <| fun inp state ->
         if inp.CanGoto(idx) then 
-            POk { idx = idx; value = () }
+            POk { idx = idx; result = () }
         else
             // TODO: this propably would be a fatal, most propably an unexpected error
             let msg = $"Index {idx} is out of range of string of length {inp.text.Length}."
@@ -280,28 +296,29 @@ let pchoose parsers = parsers |> List.reduce por
 //    parse {
 //    }
 
-let panyChar =
-    mkParser <| fun inp (state: unit) ->
+let panyChar<'s> =
+    mkParser <| fun inp (state: 's) ->
         if inp.IsAtEnd
-        then POk { idx = inp.idx; value = "" }
-        else POk { idx = inp.idx + 1; value = inp.text.Slice(inp.idx, 1).ToString() }
+        then POk { idx = inp.idx; result = "" }
+        else POk { idx = inp.idx + 1; result = inp.text.Slice(inp.idx, 1).ToString() }
 
-let pend =
-    mkParser <| fun inp (state: unit) ->
+let pend<'s> =
+    mkParser <| fun inp (state: 's) ->
         if inp.idx = inp.text.Length - 1
-        then POk { idx = inp.idx + 1; value = () }
+        then POk { idx = inp.idx + 1; result = () }
         else PError { idx = inp.idx; message = "End of input." }
 
-let pblank = pstr " "
+let pblank<'s> = pstr " "
 // TODO: blankN
 
 /// Parse at least n or more blanks.
 let pblanks n =
     parse {
         for x in 1 .. n do
-            yield! pstr " "
+            let! c = pstr " "
+            do! State.appendString c
         for x in pstr " " do
-            do! For.appendString x
+            do! State.appendString x
     }
 
 // let pSepByStr (p: Parser<_,_>) (sep: Parser<_,_>) =
@@ -329,9 +346,9 @@ module Tests =
         parse {
             for x in panyChar do
                 if x = "a" || x = "b" || x = "c" then
-                    do! For.appendString x
+                    do! State.appendString x
                 elif x = "X" then
-                    do! For.stop
+                    do! State.stop
         }
         |> run "abcdeaXabb"
 
@@ -340,11 +357,11 @@ module Tests =
     let pblanksAlternative n =
         parse {
             for x in 1 .. n do
-                yield! pstr " "
+                let! c = pstr " "
+                do! State.appendString c
             for x in panyChar do
-                do! For.appendString x
-                do! For.yieldItem "kjlk"
-            // yield! state
+                do! State.appendString x
+            return! State.flush
         }
 
 
