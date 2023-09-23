@@ -6,9 +6,9 @@ type ParserFunction<'value, 'state> = Cursor -> 'state -> ParserResult<'value>
 
 and [<Struct>] Cursor =
     { idx: int
-      text: Str }
+      text: string }
 
-and Str = ReadOnlyMemory<char>
+and Str = ReadOnlySpan<char>
 
 and [<Struct>] ParserResult<'out> =
     | POk of ok: ParserResultValue<'out>
@@ -85,23 +85,22 @@ open System.Runtime.CompilerServices
 [<Extension>]
 type StringExtensions =
     [<Extension>] static member inline StringEquals(s: Str, compareWith: string)
-        = s.Span.SequenceEqual(compareWith.AsSpan())
+        = s.SequenceEqual(compareWith.AsSpan())
     [<Extension>] static member inline StringEquals(s: Str, compareWith: Str) 
-        = s.Span.SequenceEqual(compareWith.Span)
+        = s.SequenceEqual(compareWith)
     [<Extension>] static member inline StringEquals(s: string, compareWith: Str) 
-        = s.AsSpan().SequenceEqual(compareWith.Span)
+        = s.AsSpan().SequenceEqual(compareWith)
     [<Extension>] static member inline StringEquals(s: string, compareWith: string)
         = String.Equals(s, compareWith)
 
     [<Extension>] static member StringStartsWithAt(this: Str, other: Str, idx: int)
         =
-            idx + other.Length <= this.Length
-            && this.Slice(idx, other.Length).StringEquals(other)
+        idx + other.Length <= this.Length
+        && this.Slice(idx, other.Length).StringEquals(other)
     [<Extension>] static member StringStartsWithAt(this: Str, other: string, idx: int) 
-        = this.StringStartsWithAt(other.AsMemory(), idx)
-
-module Str =
-    let empty = "".AsMemory()
+        = this.StringStartsWithAt(other.AsSpan(), idx)
+    [<Extension>] static member StringStartsWithAt(this: string, other: string, idx: int) 
+        = this.AsSpan().StringStartsWithAt(other.AsSpan(), idx)
 
 type Cursor with
     static member Create(text, idx) = { idx = idx; text = text }
@@ -114,22 +113,23 @@ type Cursor with
 
 // TODO: Perf: The parser combinators could track that, instead of computing it from scratch.
 module DocPos =
-    let create (index: int) (input: Str) =
+    let create (index: int) (input: string) =
         if index < 0 || index > input.Length then
             failwithf "Index %d is out of range of input string of length %d." index input.Length
-        
-        let lineStart, columnStart = 1, 1
-        let rec findLineAndColumn (currIdx: int) (line: int) (column: int) =
-            match currIdx = index with
-            | true -> { idx = index; ln = line; col = column }
-            | false ->
-                let line, column =
-                    if input.StringStartsWithAt("\n".AsMemory(), currIdx)
-                    then line + 1, columnStart
-                    else line, column + 1
-                findLineAndColumn (currIdx + 1) line column
-        findLineAndColumn 0 lineStart columnStart
-
+        let lineStart = 1
+        let columnStart = 1
+        let mutable currIdx = 0
+        let mutable line = lineStart
+        let mutable column = columnStart
+        while currIdx <> index do
+            let isLineBreak = input.StringStartsWithAt("\n", currIdx)
+            if isLineBreak then
+                line <- line + 1
+                column <- columnStart
+            else
+                column <- column + 1
+            currIdx <- currIdx + 1
+        { idx = index; ln = line; col = column }
     let ofInput (pi: Cursor) = create pi.idx pi.text
 
 let hasConsumed lastIdx currIdx = lastIdx > currIdx
@@ -154,7 +154,6 @@ let pseq (s: _ seq) =
         else PError { idx = inp.idx; message = "No more elements in sequence." }
 
 let inline run (text: string) (parser: Parser<_,_>) =
-    let text = text.AsMemory()
     let state = ForState()
     match getParser parser { idx = 0; text = text } state with
     | POk res -> Ok res.result
@@ -312,7 +311,7 @@ let panyChar<'s> =
     mkParser <| fun inp (state: 's) ->
         if inp.IsAtEnd
         then POk { idx = inp.idx; result = "" }
-        else POk { idx = inp.idx + 1; result = inp.text.Slice(inp.idx, 1).ToString() }
+        else POk { idx = inp.idx + 1; result = inp.text.AsSpan().Slice(inp.idx, 1).ToString() }
 
 let pend<'s> =
     mkParser <| fun inp (state: 's) ->
@@ -333,16 +332,16 @@ let pblanks n =
         return! State.flush
     }
 
-let psepByP (sep: Parser<_,_>) (p: Parser<_,_>) =
-    parse {
-        let! x = p
-        let! xs = parse {
-            for x in sep do
-                let! x = p
-                return! x
-        }
-        return! x :: xs
-    }
+// let psepByP (sep: Parser<_,_>) (p: Parser<_,_>) =
+//     parse {
+//         let! x = p
+//         let! xs = parse {
+//             for x in sep do
+//                 let! x = p
+//                 return! x
+//         }
+//         return! x :: xs
+//     }
 
 // let pSepByStr (p: Parser<_,_>) (sep: Parser<_,_>) =
 //     parse {
