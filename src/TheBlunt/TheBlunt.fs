@@ -4,9 +4,9 @@ open System
 
 type ParserFunction<'value, 'state> = Cursor -> 'state -> ParserResult<'value>
 
-and [<Struct>] Cursor =
-    { idx: int
-      text: string }
+and [<Struct>] Cursor(original: string, idx: int) =
+    member _.Idx = idx
+    member _.Original = original
 
 and Str = ReadOnlySpan<char>
 
@@ -71,7 +71,6 @@ type ForState() =
         if not isFlushed then
             do appendStateItem true
         let res = items |> List.rev
-        printfn "Flushed: %A" res
         res
 
     member val Stop = false with get, set
@@ -103,13 +102,20 @@ type StringExtensions =
         = this.AsSpan().StringStartsWithAt(other.AsSpan(), idx)
 
 type Cursor with
-    static member Create(text, idx) = { idx = idx; text = text }
     member c.CanGoto(idx: int) =
         // TODO: Should be: Only forward
-        idx >= 0 && idx <= c.text.Length
-    member c.CanWalk(steps: int) = c.CanGoto(c.idx + steps)
-    member c.IsAtEnd = c.idx = c.text.Length
-    member c.HasRest = c.idx < c.text.Length
+        idx >= 0 && idx <= c.Original.Length
+    member c.CanWalk(steps: int) = c.CanGoto(c.Idx + steps)
+    member c.IsAtEnd = c.Idx = c.Original.Length
+    member c.HasRest = c.Idx < c.Original.Length
+    member c.Rest = c.Original.AsSpan().Slice(c.Idx)
+    member c.StartsWith(s: string) = c.Rest.StringStartsWithAt(s, 0)
+    member c.Goto(idx: int) =
+        if not (c.CanGoto(idx)) then
+            failwithf "Index %d is out of range of string of length %d." idx c.Original.Length
+        Cursor(c.Original, idx)
+    member c.WalkFwd(steps: int) = c.Goto(c.Idx + steps)
+    member c.MoveNext() = c.WalkFwd(1)
 
 // TODO: Perf: The parser combinators could track that, instead of computing it from scratch.
 module DocPos =
@@ -130,7 +136,7 @@ module DocPos =
                 column <- column + 1
             currIdx <- currIdx + 1
         { idx = index; ln = line; col = column }
-    let ofInput (pi: Cursor) = create pi.idx pi.text
+    let ofInput (pi: Cursor) = create pi.Idx pi.Original
 
 let hasConsumed lastIdx currIdx = lastIdx > currIdx
 
@@ -140,22 +146,22 @@ let inline bind ([<InlineIfLambda>] f: 'a -> Parser<_,_>) (parser: Parser<_,_>) 
         | PError error -> PError error
         | POk pRes ->
             let fParser = getParser (f pRes.result)
-            fParser { inp with idx = pRes.idx } state
+            fParser (inp.Goto(pRes.idx)) state
 
 let return' value =
     mkParser <| fun inp state -> 
-        POk { idx = inp.idx; result = value }
+        POk { idx = inp.Idx; result = value }
 
 let pseq (s: _ seq) =
     let enum = s.GetEnumerator()
     mkParser <| fun inp state ->
         if enum.MoveNext()
-        then POk { idx = inp.idx; result = enum.Current }
-        else PError { idx = inp.idx; message = "No more elements in sequence." }
+        then POk { idx = inp.Idx; result = enum.Current }
+        else PError { idx = inp.Idx; message = "No more elements in sequence." }
 
 let inline run (text: string) (parser: Parser<_,_>) =
     let state = ForState()
-    match getParser parser { idx = 0; text = text } state with
+    match getParser parser (Cursor(text, 0)) state with
     | POk res -> Ok res.result
     | PError error ->
         let docPos = DocPos.create error.idx text
@@ -165,13 +171,6 @@ type ParserBuilder() =
     member inline _.Bind(p, [<InlineIfLambda>] f) = bind f p
     member _.Return(value) = return' value
     member _.ReturnFrom(value) = value
-    // member _.Yield(value) = return' [value]
-    // member _.YieldFrom(p: Parser<_,_>) =
-    //     mkParser <| fun inp state ->
-    //         let pRes = getParser p inp state
-    //         match pRes with
-    //         | PError err -> PError err
-    //         | POk pRes -> POk { idx = pRes.idx; result = [pRes.result] }
     member _.Zero() = return' ()
     member _.Delay(f) = f
     member _.Run(f) = 
@@ -182,7 +181,7 @@ type ParserBuilder() =
             let p2 = fp2 ()
             match getParser p1 inp state with
             | POk p1Res ->
-                match getParser p2 { inp with idx = p1Res.idx } state with
+                match getParser p2 (inp.Goto p1Res.idx) state with
                 | POk p2Res ->
                     POk
                         { idx = p2Res.idx
@@ -194,7 +193,7 @@ type ParserBuilder() =
             let rec iter currResults currIdx =
                 match guard () with
                 | true ->
-                    match getParser (body ()) { inp with idx = currIdx } state with
+                    match getParser (body ()) (inp.Goto currIdx) state with
                     | PError error -> PError error
                     | POk res ->
                         if hasConsumed res.idx currIdx
@@ -202,17 +201,17 @@ type ParserBuilder() =
                         else POk { idx = currIdx; result = currResults }
                 | false -> 
                     POk { idx = currIdx; result = currResults }
-            iter [] inp.idx
+            iter [] inp.Idx
     member _.For(loopParser, body: _ -> Parser<_,_>) =
         mkParser <| fun inp (state: ForState) ->
             // TODO: This is hardcoced and specialized for Strings
             let rec iter currIdx =
                 let pok idx = POk { idx = idx; result = [] }
-                match getParser loopParser { inp with idx = currIdx } state with
+                match getParser loopParser (inp.Goto currIdx) state with
                 | PError err -> pok currIdx
                 | POk loopRes ->
                     let bodyP = body loopRes.result
-                    match getParser bodyP { inp with idx = loopRes.idx } state with
+                    match getParser bodyP (inp.Goto loopRes.idx) state with
                     | PError err -> PError err
                     | POk bodyRes ->
                         let pok () = pok bodyRes.idx
@@ -222,13 +221,13 @@ type ParserBuilder() =
                             let continue' =
                                 if hasConsumed bodyRes.idx currIdx
                                 then Some bodyRes.idx
-                                elif { inp with idx = bodyRes.idx }.CanWalk(1) 
+                                elif inp.Goto(bodyRes.idx).CanWalk(1) 
                                 then Some (bodyRes.idx + 1)
                                 else None
                             match continue' with
                             | Some idx -> iter idx
                             | None -> pok ()
-            iter inp.idx
+            iter inp.Idx
     member this.For(sequence: _ seq, body) = this.For(pseq sequence, body)
 
 let parse = ParserBuilder()
@@ -237,25 +236,25 @@ module State =
     let breakLoop =
         mkParser <| fun inp (state: ForState) ->
             state.Stop <- true
-            POk { idx = inp.idx; result = () }
+            POk { idx = inp.Idx; result = () }
     let appendString (s: string) =
         mkParser <| fun inp (state: ForState) ->
             do state.AppendValue(s)
-            POk { idx = inp.idx; result = () }
+            POk { idx = inp.Idx; result = () }
     let yieldItem (s: string) =
         mkParser <| fun inp (state: ForState) ->
             do state.AddItem(s)
-            POk { idx = inp.idx; result = () }
+            POk { idx = inp.Idx; result = () }
     let yieldState clear =
         mkParser <| fun inp (state: ForState) ->
             do state.AppendStateItem clear
-            POk { idx = inp.idx; result = () }
+            POk { idx = inp.Idx; result = () }
     let getState =
         mkParser <| fun inp (state: ForState) ->
-            POk { idx = inp.idx; result = state }
+            POk { idx = inp.Idx; result = state }
     let flush =
         mkParser <| fun inp (state: ForState) ->
-            POk { idx = inp.idx; result = state.Flush() }
+            POk { idx = inp.Idx; result = state.Flush() }
 
 let map proj (p: Parser<_,_>) =
     mkParser <| fun inp state ->
@@ -268,9 +267,9 @@ let pignore (p: Parser<_,_>) =
 
 let pstr<'s> (s: string) =
     mkParser <| fun inp (state: 's) ->
-        if inp.text.StringStartsWithAt(s, inp.idx)
-        then POk { idx = inp.idx + s.Length; result = s }
-        else PError { idx = inp.idx; message = $"Expected: '{s}'" }
+        if inp.StartsWith(s)
+        then POk { idx = inp.Idx + s.Length; result = s }
+        else PError { idx = inp.Idx; message = $"Expected: '{s}'" }
 
 let goto (idx: int) =
     mkParser <| fun inp state ->
@@ -278,7 +277,7 @@ let goto (idx: int) =
             POk { idx = idx; result = () }
         else
             // TODO: this propably would be a fatal, most propably an unexpected error
-            let msg = $"Index {idx} is out of range of string of length {inp.text.Length}."
+            let msg = $"Index {idx} is out of range of string of length {inp.Original.Length}."
             PError { idx = idx; message = msg }
 
 let pAorB a b =
@@ -292,7 +291,7 @@ let pAandB a b =
     mkParser <| fun inp state ->
         match getParser a inp state with
         | POk ares ->
-            match getParser b { inp with idx = ares.idx } state with
+            match getParser b (inp.Goto ares.idx) state with
             | POk bres -> POk { idx = bres.idx; result = (ares.result, bres.result) } 
             | PError error -> PError error
         | PError error -> PError error
@@ -310,14 +309,14 @@ let pfirst parsers = parsers |> List.reduce pAorB
 let panyChar<'s> =
     mkParser <| fun inp (state: 's) ->
         if inp.IsAtEnd
-        then POk { idx = inp.idx; result = "" }
-        else POk { idx = inp.idx + 1; result = inp.text.AsSpan().Slice(inp.idx, 1).ToString() }
+        then POk { idx = inp.Idx; result = "" }
+        else POk { idx = inp.Idx + 1; result = inp.Rest.Slice(0, 1).ToString() }
 
 let pend<'s> =
     mkParser <| fun inp (state: 's) ->
-        if inp.idx = inp.text.Length - 1
-        then POk { idx = inp.idx + 1; result = () }
-        else PError { idx = inp.idx; message = "End of input." }
+        if inp.Idx = inp.Original.Length - 1
+        then POk { idx = inp.Idx + 1; result = () }
+        else PError { idx = inp.Idx; message = "End of input." }
 
 let pblank<'s> = pstr<'s> " "
 
