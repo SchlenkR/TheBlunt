@@ -112,14 +112,14 @@ type [<Struct>] DocPos =
       ln: int
       col: int }
 
-// TODO: Really mutable here?
 type ForState<'a>(id: 'a, append: 'a -> 'a -> 'a) =
     member val ShallStop = false with get, set
     member _.Id = id
-    member _.Append = append
+    member _.Append curr item = append curr item
 
 module ForState =
-    let createForString () = ForState("", fun a b -> a + b)
+    let createForNothing () = ForState((), fun _ _ -> ())
+    let createForStringAppend () = ForState("", fun curr item -> curr + item)
 
 type Cursor with
     member c.CanGoto(idx: int) =
@@ -182,27 +182,23 @@ let pseq (s: _ seq) =
         else PError { idx = inp.Idx; message = "No more elements in sequence." }
 
 let inline run (text: string) (parser: Parser<_,_>) =
-    let state = ForState.createForString()
+    let state = ForState.createForNothing()
     match getParser parser (Cursor(text, 0)) state with
     | POk res -> Ok res.result
     | PError error ->
         let docPos = DocPos.create error.idx text
         Error {| pos = docPos; message = error.message |}
 
-type StopForLoop = Stop
+type Break = Break
 
 type ParserBuilder() =
     member inline _.Bind(p, [<InlineIfLambda>] f) = bind f p
     member _.Return(x) = preturn x
     member _.ReturnFrom(p: Parser<_,_>) = p
-    member _.Delay(f) = f
-    member _.Run(f) =
-        mkParser <| fun inp state ->
-            getParser (f ()) inp state
     member _.Yield(x) =
         mkParser <| fun inp (state: ForState<_>) ->
             POk { idx = inp.Idx; result = x }
-    member _.YieldFrom(Stop _) =
+    member _.YieldFrom(Break _) =
         mkParser <| fun inp (state: ForState<_>) ->
             do state.ShallStop <- true
             POk { idx = inp.Idx; result = state.Id }
@@ -231,7 +227,7 @@ type ParserBuilder() =
                     match getParser bodyP (inp.Goto loopRes.idx) state with
                     | PError err -> PError err
                     | POk bodyRes ->
-                        let currResult = state.Append bodyRes.result currResult
+                        let currResult = state.Append currResult bodyRes.result
                         let pok () = POk { idx = bodyRes.idx; result = currResult }
                         match state.ShallStop || inp.IsAtEnd with
                         | true -> pok ()
@@ -247,6 +243,12 @@ type ParserBuilder() =
             iter inp.Idx state.Id
     member this.For(sequence: _ seq, body) =
         this.For(pseq sequence, body)
+        member _.Delay(f) = f
+    member _.Run(f) =
+        mkParser <| fun inp state ->
+            let state = ForState.createForStringAppend()
+            getParser (f ()) inp state
+
 
 let parse = ParserBuilder()
 
@@ -310,7 +312,7 @@ let firstOf parsers = parsers |> List.reduce orThen
 let anyChar<'s> =
     mkParser <| fun inp (state: 's) ->
         if inp.IsAtEnd
-        then POk { idx = inp.Idx; result = "" }
+        then PError { idx = inp.Idx; message = "End of input." }
         else POk { idx = inp.Idx + 1; result = inp.Rest[0].ToString() }
 
 let eoi<'s> =
@@ -388,9 +390,9 @@ let TEST () =
             if x = "a" || x = "b" || x = "c" then
                 yield x
             elif x = "X" then
-                yield! Stop
+                yield! Break
     }
-    |> run "abcdeaXabb"
-    |> Expect.ok "abca"
+    |> run "bacdeaXabb"
+    |> Expect.ok "baca"
 
     ()
