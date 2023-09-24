@@ -1,4 +1,7 @@
-﻿module TheBlunt
+﻿
+#if !INTERACTIVE
+module TheBlunt
+#endif
 
 open System
 
@@ -397,6 +400,7 @@ module Expect =
     let ok expected res =
         match res with
         | Ok res ->
+            printfn "Result: %A" res
             if res <> expected then
                 failwithf "Expected: %A, but got: %A" expected res
         | Error err -> failwithf "Expected: %A, but got error: %A" expected err
@@ -406,7 +410,8 @@ module Expect =
         | Error _ -> ()
 
 
-module Tests =
+#if !INTERACTIVE || !COMPILED
+module InteractiveFiddle =
 
     blank |> run "   " |> Expect.ok " "
     blank |> run " "   |> Expect.ok " "
@@ -430,3 +435,5 @@ module Tests =
     |> run "abcdeaXabb"
     |> Expect.ok ["abca"]
 
+
+#endif
