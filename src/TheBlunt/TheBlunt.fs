@@ -8,8 +8,6 @@ and [<Struct>] Cursor(original: string, idx: int) =
     member _.Idx = idx
     member _.Original = original
 
-and Str = ReadOnlySpan<char>
-
 and [<Struct>] ParserResult<'out> =
     | POk of ok: ParserResultValue<'out>
     | PError of error: ParseError
@@ -22,31 +20,39 @@ and [<Struct>] ParseError =
     { idx: int
       message: string }
 
-#if USE_SINGLE_CASE_DU
 
-type Parser<'value, 'state> = Parser of ParserFunction<'value, 'state>
 
 [<AutoOpen>]
 module ParserHandling =
+    #if USE_SINGLE_CASE_DU
+
+    type Parser<'value, 'state> = Parser of ParserFunction<'value, 'state>
+
     let inline mkParser parserFunction = Parser parserFunction
     let inline getParser (parser: Parser<_,_>) = let (Parser p) = parser in p
 
-module Inline =
-    type IfLambdaAttribute() = inherit System.Attribute()
+    module Inline =
+        type IfLambdaAttribute() = inherit System.Attribute()
 
-#else
+    #else
 
-type Parser<'value, 'state> = ParserFunction<'value, 'state>
-
-[<AutoOpen>]
-module ParserHandling =
+    type Parser<'value, 'state> = ParserFunction<'value, 'state>
+    
     let inline mkParser (parser: Parser<_,_>) = parser
     let inline getParser (parser: Parser<_,_>) = parser
 
-module Inline =
-    type IfLambdaAttribute = FSharp.Core.InlineIfLambdaAttribute
+    module Inline =
+        type IfLambdaAttribute = FSharp.Core.InlineIfLambdaAttribute
 
-#endif
+    #endif
+
+
+type Str =
+    #if !FABLE_COMPILER
+    System.ReadOnlySpan<char>
+    #else
+    System.String
+    #endif
 
 type [<Struct>] DocPos =
     { idx: int
@@ -83,29 +89,48 @@ open System.Runtime.CompilerServices
 
 [<Extension>]
 type StringExtensions =
+
+#if !FABLE_COMPILER
     [<Extension>] 
     static member inline StringEquals(s: Str, compareWith: string) = 
         s.SequenceEqual(compareWith.AsSpan())
     [<Extension>] 
     static member inline StringEquals(s: Str, compareWith: Str) =
         s.SequenceEqual(compareWith)
-    [<Extension>] 
+    [<Extension>]
     static member inline StringEquals(s: string, compareWith: Str)  =
         s.AsSpan().SequenceEqual(compareWith)
-    [<Extension>] 
+#endif
+    [<Extension>]
     static member inline StringEquals(s: string, compareWith: string) = 
         String.Equals(s, compareWith)
 
-    [<Extension>] 
+#if !FABLE_COMPILER
+    [<Extension>]
     static member StringStartsWithAt(this: Str, other: Str, idx: int) =
         idx + other.Length <= this.Length
         && this.Slice(idx, other.Length).StringEquals(other)
     [<Extension>] 
     static member StringStartsWithAt(this: Str, other: string, idx: int) =
         this.StringStartsWithAt(other.AsSpan(), idx)
-    [<Extension>] 
+    [<Extension>]
     static member StringStartsWithAt(this: string, other: string, idx: int) =
         this.AsSpan().StringStartsWithAt(other.AsSpan(), idx)
+#else
+    [<Extension>]
+    static member StringStartsWithAt(this: string, other: string, idx: int) =
+        this.Substring(idx).StartsWith(other)
+#endif
+
+#if !FABLE_COMPILER
+    [<Extension>]
+    static member Slice(this: string, start: int) =
+        this.AsSpan().Slice(start)
+#else
+    [<Extension>]
+    static member Slice(this: string, start: int) =
+        this.Substring(start)
+#endif
 
 type Cursor with
     member c.CanGoto(idx: int) =
@@ -114,7 +139,7 @@ type Cursor with
     member c.CanWalkFwd(steps: int) = c.CanGoto(c.Idx + steps)
     member c.IsAtEnd = c.Idx = c.Original.Length
     member c.HasRest = c.Idx < c.Original.Length
-    member c.Rest = c.Original.AsSpan().Slice(c.Idx)
+    member c.Rest : Str = c.Original.Slice(c.Idx)
     member c.StartsWith(s: string) = c.Rest.StringStartsWithAt(s, 0)
     member c.Goto(idx: int) =
         if not (c.CanGoto(idx)) then
@@ -144,7 +169,9 @@ module DocPos =
         { idx = index; ln = line; col = column }
     let ofInput (pi: Cursor) = create pi.Idx pi.Original
 
+// assert idx didn't move backwards
 let hasConsumed lastIdx currIdx = lastIdx > currIdx
+let standsStill lastIdx currIdx = lastIdx = currIdx
 
 let inline bind ([<InlineIfLambda>] f: 'a -> Parser<_,_>) (parser: Parser<_,_>) =
     mkParser <| fun inp state ->
@@ -198,15 +225,15 @@ type ParserBuilder() =
         mkParser <| fun inp state ->
             let rec iter currResults currIdx =
                 match guard () with
+                | false -> 
+                    POk { idx = currIdx; result = currResults }
                 | true ->
                     match getParser (body ()) (inp.Goto currIdx) state with
                     | PError error -> PError error
                     | POk res ->
-                        if hasConsumed res.idx currIdx
-                        then iter (List.append currResults res.result) res.idx
-                        else POk { idx = currIdx; result = currResults }
-                | false -> 
-                    POk { idx = currIdx; result = currResults }
+                        if standsStill res.idx currIdx
+                        then POk { idx = currIdx; result = currResults }
+                        else iter (List.append currResults res.result) res.idx
             iter [] inp.Idx
     member _.For(loopParser, body: _ -> Parser<_,_>) =
         mkParser <| fun inp (state: ForState) ->
@@ -224,22 +251,24 @@ type ParserBuilder() =
                         match state.Stop || inp.IsAtEnd with
                         | true -> pok ()
                         | false ->
-                            let continue' =
-                                if hasConsumed bodyRes.idx currIdx
-                                then Some bodyRes.idx
-                                else
-                                    let nextIdx = bodyRes.idx + 1
-                                    if inp.CanGoto(nextIdx)
-                                    then Some nextIdx
-                                    else None
-                            match continue' with
-                            | Some idx -> iter idx
-                            | None -> pok ()
+                            if standsStill bodyRes.idx currIdx
+                            then
+                                let nextIdx = bodyRes.idx + 1
+                                if not (inp.CanGoto(nextIdx))
+                                then pok ()
+                                else iter nextIdx 
+                            else
+                                iter bodyRes.idx
+                                
             iter inp.Idx
     member this.For(sequence: _ seq, body) = this.For(pseq sequence, body)
 
 let parse = ParserBuilder()
 
+// TODO: I guess that all the state stuff will turn out to be a quite unuseful,
+// or compared to the 
+
+[<RequireQualifiedAccess>]
 module State =
     let breakLoop =
         mkParser <| fun inp (state: ForState) ->
@@ -288,14 +317,14 @@ let goto (idx: int) =
             let msg = $"Index {idx} is out of range of string of length {inp.Original.Length}."
             PError { idx = idx; message = msg }
 
-let pAorB a b =
+let orThen a b =
     mkParser <| fun inp state ->
         match getParser a inp state with
         | POk res -> POk res
         | PError _ -> getParser b inp state
-let ( <|> ) a b = pAorB a b
+let ( <|> ) a b = orThen a b
 
-let pAandB a b =
+let andThen a b =
     mkParser <| fun inp state ->
         match getParser a inp state with
         | POk ares ->
@@ -303,9 +332,9 @@ let pAandB a b =
             | POk bres -> POk { idx = bres.idx; result = (ares.result, bres.result) } 
             | PError error -> PError error
         | PError error -> PError error
-let ( <&> ) a b = pAandB a b
+let ( <&> ) a b = andThen a b
 
-let pfirst parsers = parsers |> List.reduce pAorB
+let firstOf parsers = parsers |> List.reduce orThen
 
 // TODO: sepBy
 // TODO: skipN
@@ -314,41 +343,47 @@ let pfirst parsers = parsers |> List.reduce pAorB
 //    parse {
 //    }
 
-let panyChar<'s> =
+let anyChar<'s> =
     mkParser <| fun inp (state: 's) ->
         if inp.IsAtEnd
         then POk { idx = inp.Idx; result = "" }
-        else POk { idx = inp.Idx + 1; result = inp.Rest.Slice(0, 1).ToString() }
+        else POk { idx = inp.Idx + 1; result = inp.Rest[0].ToString() }
 
-let pend<'s> =
+let eoi<'s> =
     mkParser <| fun inp (state: 's) ->
         if inp.Idx = inp.Original.Length - 1
         then POk { idx = inp.Idx + 1; result = () }
         else PError { idx = inp.Idx; message = "End of input." }
 
-let pblank<'s> = pstr<'s> " "
+let blank<'s> = pstr<'s> " "
 
 /// Parse at least n or more blanks.
-let pblanks n =
+let blanks n =
     parse {
         for x in 1 .. n do
-            let! c = pblank
+            let! c = blank
             do! State.appendString c
-        for x in pblank do
+        for x in blank do
             do! State.appendString x
         return! State.flush
     }
 
-// let psepByP (sep: Parser<_,_>) (p: Parser<_,_>) =
-//     parse {
-//         let! x = p
-//         let! xs = parse {
-//             for x in sep do
-//                 let! x = p
-//                 return! x
-//         }
-//         return! x :: xs
-//     }
+let attempt p =
+    mkParser <| fun inp state ->
+        match getParser p inp state with
+        | POk res -> POk { idx = res.idx; result = Some res }
+        | PError err -> PError err
+
+let strUntil untilP p =
+    mkParser <| fun inp state ->
+        let rec iter currIdx =
+            match getParser (attempt untilP) (inp.Goto currIdx) state with
+            | POk _ -> POk { idx = currIdx; result = inp.Original.Substring(inp.Idx, currIdx - inp.Idx) }
+            | PError _ ->
+                if not (inp.CanGoto(currIdx + 1))
+                then PError { idx = currIdx; message = "End of input." }
+                else iter (currIdx + 1)
+        iter inp.Idx
 
 // let pSepByStr (p: Parser<_,_>) (sep: Parser<_,_>) =
 //     parse {
@@ -373,19 +408,19 @@ module Expect =
 
 module Tests =
 
-    pblank |> run "   " |> Expect.ok " "
-    pblank |> run " "   |> Expect.ok " "
-    pblank |> run "x"   |> Expect.error
-    pblank |> run ""    |> Expect.error
+    blank |> run "   " |> Expect.ok " "
+    blank |> run " "   |> Expect.ok " "
+    blank |> run "x"   |> Expect.error
+    blank |> run ""    |> Expect.error
     
-    pblanks 1 |> run "   xxx" |> Expect.ok ["   "]
-    pblanks 1 |> run "  xxx"  |> Expect.ok ["  "]
-    pblanks 1 |> run " xxx"   |> Expect.ok [" "]
-    pblanks 1 |> run "xxx"    |> Expect.error
-    pblanks 0 |> run "xxx"    |> Expect.ok []
+    blanks 1 |> run "   xxx" |> Expect.ok ["   "]
+    blanks 1 |> run "  xxx"  |> Expect.ok ["  "]
+    blanks 1 |> run " xxx"   |> Expect.ok [" "]
+    blanks 1 |> run "xxx"    |> Expect.error
+    blanks 0 |> run "xxx"    |> Expect.ok []
 
     parse {
-        for x in panyChar do
+        for x in anyChar do
             if x = "a" || x = "b" || x = "c" then
                 do! State.appendString x
             elif x = "X" then
