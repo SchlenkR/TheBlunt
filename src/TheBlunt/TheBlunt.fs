@@ -4,6 +4,65 @@ module TheBlunt
 #endif
 
 open System
+open System.Runtime.CompilerServices
+
+type Str =
+    #if !FABLE_COMPILER
+    System.ReadOnlySpan<char>
+    #else
+    System.String
+    #endif
+
+[<Extension>]
+type StringExtensions =
+
+    #if !FABLE_COMPILER
+    [<Extension>] 
+    static member inline StringEquals(s: Str, compareWith: string) = 
+        s.SequenceEqual(compareWith.AsSpan())
+    [<Extension>] 
+    static member inline StringEquals(s: Str, compareWith: Str) =
+        s.SequenceEqual(compareWith)
+    [<Extension>]
+    static member inline StringEquals(s: string, compareWith: Str)  =
+        s.AsSpan().SequenceEqual(compareWith)
+    #endif
+    [<Extension>]
+    static member inline StringEquals(s: string, compareWith: string) = 
+        String.Equals(s, compareWith)
+
+    #if !FABLE_COMPILER
+    [<Extension>]
+    static member StringStartsWithAt(this: Str, other: Str, idx: int) =
+        idx + other.Length <= this.Length
+        && this.Slice(idx, other.Length).StringEquals(other)
+    [<Extension>] 
+    static member StringStartsWithAt(this: Str, other: string, idx: int) =
+        this.StringStartsWithAt(other.AsSpan(), idx)
+    [<Extension>]
+    static member StringStartsWithAt(this: string, other: string, idx: int) =
+        this.AsSpan().StringStartsWithAt(other.AsSpan(), idx)
+    #else
+    [<Extension>]
+    static member StringStartsWithAt(this: string, other: string, idx: int) =
+        this.Substring(idx).StartsWith(other)
+    #endif
+
+    #if !FABLE_COMPILER
+    [<Extension>]
+    static member Slice(this: string, start: int) =
+        this.AsSpan().Slice(start)
+    #else
+    [<Extension>]
+    static member Slice(this: string, start: int) =
+        this.Substring(start)
+    #endif
+
+
+// -----------------------------------------------------------------------------------------------
+// BEGIN :)
+// -----------------------------------------------------------------------------------------------
+
 
 type ParserFunction<'value, 'state> = Cursor -> 'state -> ParserResult<'value>
 
@@ -22,7 +81,6 @@ and [<Struct>] ParserResultValue<'out> =
 and [<Struct>] ParseError =
     { idx: int
       message: string }
-
 
 
 [<AutoOpen>]
@@ -49,91 +107,19 @@ module ParserHandling =
 
     #endif
 
-
-type Str =
-    #if !FABLE_COMPILER
-    System.ReadOnlySpan<char>
-    #else
-    System.String
-    #endif
-
 type [<Struct>] DocPos =
     { idx: int
       ln: int
       col: int }
 
-type ForState() =
-    let sb = System.Text.StringBuilder()
-    let mutable items = []
-    let mutable isFlushed = true
-    
-    let appendValue (value: string) =
-        do sb.Append(value) |> ignore
-        do isFlushed <- false
-    let addItem item = items <- item :: items
-    let appendStateItem clear = 
-        do addItem (sb.ToString())
-        if clear then
-            do sb.Clear() |> ignore
-            do isFlushed <- true
-    let flush () =
-        if not isFlushed then
-            do appendStateItem true
-        let res = items |> List.rev
-        res
+// TODO: Really mutable here?
+type ForState<'a>(id: 'a, append: 'a -> 'a -> 'a) =
+    member val ShallStop = false with get, set
+    member _.Id = id
+    member _.Append = append
 
-    member val Stop = false with get, set
-    member _.AppendValue(value) : unit = appendValue value
-    member _.Flush() = flush ()
-    member _.AddItem(item) = addItem item
-    member _.AppendStateItem(clear) = appendStateItem clear
-
-open System.Runtime.CompilerServices
-
-[<Extension>]
-type StringExtensions =
-
-#if !FABLE_COMPILER
-    [<Extension>] 
-    static member inline StringEquals(s: Str, compareWith: string) = 
-        s.SequenceEqual(compareWith.AsSpan())
-    [<Extension>] 
-    static member inline StringEquals(s: Str, compareWith: Str) =
-        s.SequenceEqual(compareWith)
-    [<Extension>]
-    static member inline StringEquals(s: string, compareWith: Str)  =
-        s.AsSpan().SequenceEqual(compareWith)
-#endif
-    [<Extension>]
-    static member inline StringEquals(s: string, compareWith: string) = 
-        String.Equals(s, compareWith)
-
-#if !FABLE_COMPILER
-    [<Extension>]
-    static member StringStartsWithAt(this: Str, other: Str, idx: int) =
-        idx + other.Length <= this.Length
-        && this.Slice(idx, other.Length).StringEquals(other)
-    [<Extension>] 
-    static member StringStartsWithAt(this: Str, other: string, idx: int) =
-        this.StringStartsWithAt(other.AsSpan(), idx)
-    [<Extension>]
-    static member StringStartsWithAt(this: string, other: string, idx: int) =
-        this.AsSpan().StringStartsWithAt(other.AsSpan(), idx)
-#else
-    [<Extension>]
-    static member StringStartsWithAt(this: string, other: string, idx: int) =
-        this.Substring(idx).StartsWith(other)
-#endif
-
-#if !FABLE_COMPILER
-    [<Extension>]
-    static member Slice(this: string, start: int) =
-        this.AsSpan().Slice(start)
-#else
-    [<Extension>]
-    static member Slice(this: string, start: int) =
-        this.Substring(start)
-#endif
+module ForState =
+    let createForString () = ForState("", fun a b -> a + b)
 
 type Cursor with
     member c.CanGoto(idx: int) =
@@ -184,7 +170,7 @@ let inline bind ([<InlineIfLambda>] f: 'a -> Parser<_,_>) (parser: Parser<_,_>) 
             let fParser = getParser (f pRes.result)
             fParser (inp.Goto(pRes.idx)) state
 
-let return' value =
+let preturn value =
     mkParser <| fun inp state -> 
         POk { idx = inp.Idx; result = value }
 
@@ -196,62 +182,58 @@ let pseq (s: _ seq) =
         else PError { idx = inp.Idx; message = "No more elements in sequence." }
 
 let inline run (text: string) (parser: Parser<_,_>) =
-    let state = ForState()
+    let state = ForState.createForString()
     match getParser parser (Cursor(text, 0)) state with
     | POk res -> Ok res.result
     | PError error ->
         let docPos = DocPos.create error.idx text
         Error {| pos = docPos; message = error.message |}
 
+type StopForLoop = Stop
+
 type ParserBuilder() =
     member inline _.Bind(p, [<InlineIfLambda>] f) = bind f p
-    member _.Return(value) = return' value
-    member _.ReturnFrom(value) = value
-    member _.Zero() = return' ()
+    member _.Return(x) = preturn x
+    member _.ReturnFrom(p: Parser<_,_>) = p
     member _.Delay(f) = f
-    member _.Run(f) = 
+    member _.Run(f) =
         mkParser <| fun inp state ->
             getParser (f ()) inp state
+    member _.Yield(x) =
+        mkParser <| fun inp (state: ForState<_>) ->
+            POk { idx = inp.Idx; result = x }
+    member _.YieldFrom(Stop _) =
+        mkParser <| fun inp (state: ForState<_>) ->
+            do state.ShallStop <- true
+            POk { idx = inp.Idx; result = state.Id }
+    member _.Zero() =
+        mkParser <| fun inp (state: ForState<_>) ->
+            POk { idx = inp.Idx; result = state.Id }
     member _.Combine(p1, fp2) = 
-        mkParser <| fun inp state ->
+        mkParser <| fun inp (state: ForState<_>) ->
             let p2 = fp2 ()
-            match getParser p1 inp state with
+            match getParser p1 inp (state: ForState<_>) with
             | POk p1Res ->
                 match getParser p2 (inp.Goto p1Res.idx) state with
                 | POk p2Res ->
-                    POk
-                        { idx = p2Res.idx
-                          result = List.append p1Res.result p2Res.result }
+                    let res = state.Append p1Res.result p2Res.result
+                    POk { idx = p2Res.idx; result = res }
                 | PError error -> PError error
             | PError error -> PError error
-    member _.While(guard, body) =
-        mkParser <| fun inp state ->
-            let rec iter currResults currIdx =
-                match guard () with
-                | false -> 
-                    POk { idx = currIdx; result = currResults }
-                | true ->
-                    match getParser (body ()) (inp.Goto currIdx) state with
-                    | PError error -> PError error
-                    | POk res ->
-                        if standsStill res.idx currIdx
-                        then POk { idx = currIdx; result = currResults }
-                        else iter (List.append currResults res.result) res.idx
-            iter [] inp.Idx
-    member _.For(loopParser, body: _ -> Parser<_,_>) =
-        mkParser <| fun inp (state: ForState) ->
+    member _.For(loopParser, body) =
+        mkParser <| fun inp (state: ForState<_>) ->
             // TODO: This is hardcoced and specialized for Strings
-            let rec iter currIdx =
-                let pok idx = POk { idx = idx; result = [] }
+            let rec iter currIdx currResult =
                 match getParser loopParser (inp.Goto currIdx) state with
-                | PError err -> pok currIdx
+                | PError err -> POk { idx = currIdx; result = currResult }
                 | POk loopRes ->
                     let bodyP = body loopRes.result
                     match getParser bodyP (inp.Goto loopRes.idx) state with
                     | PError err -> PError err
                     | POk bodyRes ->
-                        let pok () = pok bodyRes.idx
-                        match state.Stop || inp.IsAtEnd with
+                        let currResult = state.Append bodyRes.result currResult
+                        let pok () = POk { idx = bodyRes.idx; result = currResult }
+                        match state.ShallStop || inp.IsAtEnd with
                         | true -> pok ()
                         | false ->
                             if standsStill bodyRes.idx currIdx
@@ -259,42 +241,17 @@ type ParserBuilder() =
                                 let nextIdx = bodyRes.idx + 1
                                 if not (inp.CanGoto(nextIdx))
                                 then pok ()
-                                else iter nextIdx 
+                                else iter nextIdx currResult
                             else
-                                iter bodyRes.idx
-                                
-            iter inp.Idx
-    member this.For(sequence: _ seq, body) = this.For(pseq sequence, body)
+                                iter bodyRes.idx currResult
+            iter inp.Idx state.Id
+    member this.For(sequence: _ seq, body) =
+        this.For(pseq sequence, body)
 
 let parse = ParserBuilder()
 
 // TODO: I guess that all the state stuff will turn out to be a quite unuseful,
 // or compared to the 
-
-[<RequireQualifiedAccess>]
-module State =
-    let breakLoop =
-        mkParser <| fun inp (state: ForState) ->
-            state.Stop <- true
-            POk { idx = inp.Idx; result = () }
-    let appendString (s: string) =
-        mkParser <| fun inp (state: ForState) ->
-            do state.AppendValue(s)
-            POk { idx = inp.Idx; result = () }
-    let yieldItem (s: string) =
-        mkParser <| fun inp (state: ForState) ->
-            do state.AddItem(s)
-            POk { idx = inp.Idx; result = () }
-    let yieldState clear =
-        mkParser <| fun inp (state: ForState) ->
-            do state.AppendStateItem clear
-            POk { idx = inp.Idx; result = () }
-    let getState =
-        mkParser <| fun inp (state: ForState) ->
-            POk { idx = inp.Idx; result = state }
-    let flush =
-        mkParser <| fun inp (state: ForState) ->
-            POk { idx = inp.Idx; result = state.Flush() }
 
 let map proj (p: Parser<_,_>) =
     mkParser <| fun inp state ->
@@ -304,6 +261,10 @@ let map proj (p: Parser<_,_>) =
 
 let pignore (p: Parser<_,_>) =
     p |> map (fun _ -> ())
+
+let punit<'s> =
+    mkParser <| fun inp (state: 's) ->
+        POk { idx = inp.Idx; result = () }
 
 let pstr<'s> (s: string) =
     mkParser <| fun inp (state: 's) ->
@@ -365,10 +326,9 @@ let blanks n =
     parse {
         for x in 1 .. n do
             let! c = blank
-            do! State.appendString c
+            yield c
         for x in blank do
-            do! State.appendString x
-        return! State.flush
+            yield x
     }
 
 let attempt p =
@@ -410,30 +370,27 @@ module Expect =
         | Error _ -> ()
 
 
-#if !INTERACTIVE || !COMPILED
-module InteractiveFiddle =
+let TEST () =
 
     blank |> run "   " |> Expect.ok " "
     blank |> run " "   |> Expect.ok " "
     blank |> run "x"   |> Expect.error
     blank |> run ""    |> Expect.error
     
-    blanks 1 |> run "   xxx" |> Expect.ok ["   "]
-    blanks 1 |> run "  xxx"  |> Expect.ok ["  "]
-    blanks 1 |> run " xxx"   |> Expect.ok [" "]
-    blanks 1 |> run "xxx"    |> Expect.error
-    blanks 0 |> run "xxx"    |> Expect.ok []
+    blanks 1 |> run "     xxx" |> Expect.ok "     "
+    blanks 1 |> run "  xxx"    |> Expect.ok "  "
+    blanks 1 |> run " xxx"     |> Expect.ok " "
+    blanks 1 |> run "xxx"      |> Expect.error
+    blanks 0 |> run "xxx"      |> Expect.ok ""
 
     parse {
         for x in anyChar do
             if x = "a" || x = "b" || x = "c" then
-                do! State.appendString x
+                yield x
             elif x = "X" then
-                do! State.breakLoop
-        return! State.flush
+                yield! Stop
     }
     |> run "abcdeaXabb"
-    |> Expect.ok ["abca"]
+    |> Expect.ok "abca"
 
-
-#endif
+    ()
