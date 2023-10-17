@@ -3,6 +3,7 @@ src/TheBlunt/**/*.js
 src/TheBlunt/**/*.ts
 
 fable_modules/
+.pack/
 
 # User-specific files
 *.rsuser

@@ -5,7 +5,6 @@
 module TheBlunt.Tests
 #endif
 
-open System
 open NUnit.Framework
 open TheBlunt
 
@@ -54,19 +53,19 @@ let [<TestCase>] ``not followed by`` () =
     |> Expect.ok "ab"
 
 let [<TestCase>] ``many and friends`` () =
-    many (%"ab") |> pconcat
+    many %"ab" |> pconcat
     |> run "abababX"
     |> Expect.ok "ababab"
 
-    many (%"ab") |> pconcat
+    many %"ab" |> pconcat
     |> run ""
     |> Expect.ok ""
 
-    many1Str (%"ab")
+    many1Str %"ab"
     |> run ""
     |> Expect.error
 
-    many1Str (%"ab")
+    many1Str %"ab"
     |> run "abababX"
     |> Expect.ok "ababab"
 
