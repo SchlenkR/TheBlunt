@@ -23,5 +23,5 @@ Some Facts and Infos:
 * No dependencies
 * State: Far from complete. It's a "works for me" implementation used in [Trulla Templates](https://github.com/RonaldSchlenker/Trulla)
 * **Examples**
-  * Have look at [Trulla Templates Parser](https://github.com/RonaldSchlenker/Trulla/blob/main/src/Core/Parsing.fs)
+  * Have look at [Trulla Templates Parser](https://github.com/RonaldSchlenker/Trulla/blob/main/src/CoreFiles/Parsing.fs)
   * Have a look at the [Tests](./src/Tests/ParserTests.fs)
