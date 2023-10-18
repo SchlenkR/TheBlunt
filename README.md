@@ -1,7 +1,7 @@
 
 
 <p align="center">
-    <img src='./artwork/Original Logo.png' alt='logo' width='300' />
+    <img src='./artwork/logo-github.png' alt='logo' width='300' />
 </p>
 
 
