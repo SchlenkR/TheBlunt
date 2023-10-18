@@ -1,4 +1,9 @@
-# TheBlunt
+
+
+<p align="center">
+    <img src='./artwork/Original Logo.png' alt='logo' width='300' />
+</p>
+
 
 A a one-file recursive parser combinator library for F# and Fable.
 
