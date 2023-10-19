@@ -5,14 +5,14 @@
 </p>
 
 
-A a one-file recursive parser combinator library for F# and Fable.
+A a one-file recursive descent parser combinator library for F# and Fable.
 
 [![NuGet Badge](http://img.shields.io/nuget/v/TheBlunt.svg?style=flat)](https://www.nuget.org/packages/TheBlunt)
 
 Some Facts and Infos:
 ---
 
-* It's just another recursive descent parser combinator
+* It's just another recursive descent parser combinator library
 * Focus on parsing string documents
 * For sure not made for everything, but may work well for small to medium stuff
 * **Performance**
