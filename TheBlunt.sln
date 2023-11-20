@@ -3,9 +3,9 @@ Microsoft Visual Studio Solution File, Format Version 12.00
 # Visual Studio Version 17
 VisualStudioVersion = 17.0.31903.59
 MinimumVisualStudioVersion = 10.0.40219.1
-Project("{F2A71F9B-5D33-465A-A702-920D77279786}") = "TheBlunt", "TheBlunt\TheBlunt.fsproj", "{055D0F61-2287-46BE-AB5F-39188216C5A6}"
+Project("{F2A71F9B-5D33-465A-A702-920D77279786}") = "TheBlunt", "src\TheBlunt\TheBlunt.fsproj", "{055D0F61-2287-46BE-AB5F-39188216C5A6}"
 EndProject
-Project("{F2A71F9B-5D33-465A-A702-920D77279786}") = "Tests", "Tests\Tests.fsproj", "{A396801D-AF77-4FEB-86A5-67A877A42A5A}"
+Project("{F2A71F9B-5D33-465A-A702-920D77279786}") = "Tests", "src\Tests\Tests.fsproj", "{A396801D-AF77-4FEB-86A5-67A877A42A5A}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution

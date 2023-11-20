@@ -1,5 +1,3 @@
-
-
 <p align="center">
     <img src='./artwork/logo_github.png' alt='logo' width='300' />
 </p>

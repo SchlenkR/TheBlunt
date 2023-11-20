@@ -1,1 +1,0 @@
-dotnet fsi publishToNuget.fsx
