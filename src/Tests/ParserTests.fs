@@ -1,5 +1,6 @@
 ﻿
 #if INTERACTIVE
+#r "nuget: NUnit"
 #load "../TheBlunt/TheBlunt.fs"
 #else
 module TheBlunt.Tests
@@ -22,6 +23,7 @@ module Expect =
 
 
 let [<TestCase>] ``blanks and whitespaces`` () =
+
     blank |> run "   " |> Expect.ok " "
     blank |> run " "   |> Expect.ok " "
     blank |> run "x"   |> Expect.error
@@ -38,12 +40,15 @@ let [<TestCase>] ``blanks and whitespaces`` () =
     blanks1 |> run "xxx"      |> Expect.error
 
 let [<TestCase>] ``letter and digit`` () =
+
     letter |> run "abc" |> Expect.ok "a"
     letter |> run "1abc" |> Expect.error
+
     digit |> run "1abc" |> Expect.ok "1"
     digit |> run "abc" |> Expect.error
 
 let [<TestCase>] ``not followed by`` () =
+
     notFollowedBy %"ab" "c"
     |> run "abc"
     |> Expect.error
@@ -53,6 +58,7 @@ let [<TestCase>] ``not followed by`` () =
     |> Expect.ok "ab"
 
 let [<TestCase>] ``many and friends`` () =
+
     many %"ab" |> pconcat
     |> run "abababX"
     |> Expect.ok "ababab"
@@ -70,6 +76,7 @@ let [<TestCase>] ``many and friends`` () =
     |> Expect.ok "ababab"
 
 let [<TestCase>] ``separation`` () =
+
     %"ab" |> psepBy1 %";" |> noRanges
     |> run "ab;ab;ab"
     |> Expect.ok ["ab"; "ab"; "ab" ]
@@ -86,7 +93,28 @@ let [<TestCase>] ``separation`` () =
     |> run "ab;ab;ab;"
     |> Expect.ok ["ab"; "ab"; "ab" ]
 
+    // ----- Regression Issue 1
+
+    let separator = %"/"
+    let plainSegment = pstringUntil separator
+    let segments = psepBy1 separator plainSegment
+
+    segments |> noRanges
+    |> run "segment1/segment2/segment3"
+    |> Expect.ok ["segment1"; "segment2"; "segment3"]
+
+    pstringUntil %"/" |> psepBy1 %"/" |> noRanges
+    |> run "segment1/segment1/segment3/segment4"
+    |> Expect.ok ["segment1"; "segment2"; "segment3"]
+
+    pstringUntil %"/" |> psepBy1 %"/" |> noRanges
+    |> run "segment1/segment1/segment3/segment4"
+    |> Expect.ok ["segment1"; "segment2"; "segment3"]
+
+    ()
+
 let [<TestCase>] ``alternatives`` () =
+
     pchoice [%"a"; %"b"; %"c" ]
     |> run "cab"
     |> Expect.ok "c"
@@ -94,3 +122,26 @@ let [<TestCase>] ``alternatives`` () =
     pchoice [%"a"; %"b"; %"c" ]
     |> run "xyz"
     |> Expect.error
+
+let [<TestCase>] ``until`` () =
+
+    pstringUntil %"."
+    |> run "Hallo.Welt"
+    |> Expect.ok "Hallo"
+    
+    parse {
+        let! hallo = pstringUntil %"."
+
+        // pstringUntil does not consume the separator
+        let! _ = pchar1 '.'
+
+        let! welt = %"Welt"
+        
+        return 
+            { 
+                range = PVal.ranges [hallo; welt]
+                result = hallo.result + welt.result 
+            }
+    }
+    |> run "Hallo.Welt"
+    |> Expect.ok "HalloWelt"

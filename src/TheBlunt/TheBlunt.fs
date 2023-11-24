@@ -128,6 +128,10 @@ module PVal =
         { range = pval.range; result = proj pval.result }
     let ranges (pvals: PVal<'a> list) = 
         pvals |> List.map (fun x -> x.range) |> Range.merge
+    let reduce (pvals: PVal<'a> list) reducer = 
+        let ranges = ranges pvals
+        let result = pvals |> List.map (fun x -> x.result) |> List.reduce reducer
+        { range = ranges; result = result }
 
 // TODO: Perf: The parser combinators could track that, instead of computing it from scratch.
 module DocPos =
@@ -246,11 +250,6 @@ let inline pnot ([<InlineIfLambda>] p) =
         | PError _ -> POk.create inp.idx inp.idx ()
     )
 
-let punit =
-    mkParser (fun inp ->
-        POk.create inp.idx inp.idx ()
-    )
-
 let pstr (s: string) =
     mkParser (fun inp ->
         if inp.StartsWith(s)
@@ -330,7 +329,6 @@ let inline many1 ([<InlineIfLambda>] p) =
         | _ -> return res
     }
 
-// TODO: sepBy
 // TODO: skipN
 
 let anyChar =
@@ -397,6 +395,9 @@ let pchar predicate errMsg =
         if predicate c
         then POk.create inp.idx (inp.idx + 1) (string c)
         else PError.create inp.idx (errMsg c)
+
+let pchar1 expectedChar =
+    pchar (fun c -> c = expectedChar) (fun c -> $"Expected '{expectedChar}', got '{c}'.")
 
 let letter =
     pchar (Char.IsLetter) (sprintf "Expected letter, but got '%c'.")
