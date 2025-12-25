@@ -12,6 +12,7 @@ Some Facts and Infos:
 
 * It's just another recursive descent parser combinator library
 * Focus on parsing string documents
+* The original **ranges** that lead to a parse result are retained
 * For sure not made for everything, but may work well for small to medium stuff
 * **Performance**
   * Making use of Spans
