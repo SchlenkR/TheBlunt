@@ -104,12 +104,12 @@ let [<TestCase>] ``separation`` () =
     |> Expect.ok ["segment1"; "segment2"; "segment3"]
 
     pstringUntil %"/" |> psepBy1 %"/" |> noRanges
-    |> run "segment1/segment1/segment3/segment4"
-    |> Expect.ok ["segment1"; "segment2"; "segment3"]
+    |> run "segment1/segment2/segment3/segment4"
+    |> Expect.ok ["segment1"; "segment2"; "segment3"; "segment4"]
 
     pstringUntil %"/" |> psepBy1 %"/" |> noRanges
-    |> run "segment1/segment1/segment3/segment4"
-    |> Expect.ok ["segment1"; "segment2"; "segment3"]
+    |> run "segment1/segment2/segment3/segment4"
+    |> Expect.ok ["segment1"; "segment2"; "segment3"; "segment4"]
 
     ()
 
